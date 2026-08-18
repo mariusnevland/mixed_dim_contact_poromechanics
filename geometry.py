@@ -56,8 +56,10 @@ gmsh.model.geo.synchronize()
 # Matrix subdomains
 gmsh.model.addPhysicalGroup(2, [upper_rectangle], 1)
 gmsh.model.addPhysicalGroup(2, [lower_rectangle], 2)
-# External boundary
-gmsh.model.addPhysicalGroup(1, [l1, lower_boundary_to_midpoint_right, midpoint_right_to_upper_boundary, l3, upper_boundary_to_midpoint_left, midpoint_left_to_lower_boundary], 1)
+# External boundary minus the bottom
+gmsh.model.addPhysicalGroup(1, [lower_boundary_to_midpoint_right, midpoint_right_to_upper_boundary, l3, upper_boundary_to_midpoint_left, midpoint_left_to_lower_boundary], 1)
+# Bottom boundary
+gmsh.model.addPhysicalGroup(1, [l1], 4)
 # Fracture and interfaces between matrix subdomains
 gmsh.model.addPhysicalGroup(1, [mid_to_fracture_left, fracture_to_mid_right], 2)
 gmsh.model.addPhysicalGroup(1, [frac], 3)
@@ -80,6 +82,7 @@ cells_omega = subdomains.indices
 cells_omega_plus = subdomains.indices[subdomains.values == 1]
 cells_omega_minus = subdomains.indices[subdomains.values == 2]
 facets_partial_omega = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 1]
+facets_bottom = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 4]
 facets_interface_not_frac = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 2]
 facets_frac = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 3]
 
@@ -105,22 +108,12 @@ dS = dS(2)
 
 
 # Function spaces
-P1_displacement = element("Lagrange", mesh.basix_cell(), 1, shape=(mesh.geometry.dim,), dtype=default_real_type)
-P1_pressure = element("Lagrange", mesh.basix_cell(), 1, dtype=default_real_type)
-W = fem.functionspace(mesh, mixed_element([P1_displacement, P1_pressure]))
-V0 = W.sub(0)
-Q0 = W.sub(1)
-V, _ = V0.collapse()
-Q, _ = Q0.collapse()
-w = fem.Function(W)  # Current solution     
-w_n = fem.Function(W)  # Solution at previous timestep
-(u, p) = ufl.split(w)  # Split into displacement and pressure
-(u_n, p_n) = ufl.split(w_n)
-(v, q) = ufl.TestFunctions(W)  # Test functions for displacement and pressure
+V = fem.functionspace(mesh, ("Lagrange", 1, (mesh.geometry.dim,)))  # Space for the displacement
+Q = fem.functionspace(mesh, ("Lagrange", 1))  # Space for the matrix pressure
 Qc = Q.clone()  # Space for the fracture pressure
-pc = fem.Function(Qc)  # Fracture pressure
-pc_n = fem.Function(Qc)  # Fracture pressure at previous timestep
-qc = ufl.TestFunction(Qc)
+(u, p, pc) = (fem.Function(V), fem.Function(Q), fem.Function(Qc))  # Solutions
+(v, q, qc) = (ufl.TestFunction(V), ufl.TestFunction(Q), ufl.TestFunction(Qc))  # Test functions
+(u_n, p_n, pc_n) = (fem.Function(V), fem.Function(Q), fem.Function(Qc))  # Solutions at previous timestep
 
 # Define restrictions
 fdim = boundaries_and_interfaces.dim
@@ -133,14 +126,16 @@ restriction_V = multiphenicsx.fem.DofMapRestriction(V.dofmap, dofs_V_omega)
 restriction = [restriction_V, restriction_Q]
 
 # Define boundary conditions
+zero = dolfinx.fem.Constant(mesh, default_scalar_type(0))
+zero_vector = dolfinx.fem.Constant(mesh, default_scalar_type((0,) * mesh.geometry.dim))
 u_D = fem.Function(V)
 p_D = fem.Function(Q)
 u_D.x.array[:] = 0
 p_D.x.array[:] = 0
-combined_dofs_V = fem.locate_dofs_topological((V0, V), fdim, facets_partial_omega)
-combined_dofs_Q = fem.locate_dofs_topological((Q0, Q), fdim, facets_partial_omega)
-bc_u = fem.dirichletbc(u_D, combined_dofs_V, V0)
-bc_p = fem.dirichletbc(p_D, combined_dofs_Q, Q0)
+dofs_V = fem.locate_dofs_topological(V, fdim, facets_partial_omega)
+dofs_Q = fem.locate_dofs_topological(Q, fdim, facets_partial_omega)
+bc_u = fem.dirichletbc(zero_vector, dofs_V, V)
+bc_p = fem.dirichletbc(zero, dofs_Q, Q)
 bc = [bc_u, bc_p]
 
 # Material parameters
@@ -199,7 +194,7 @@ fluid_equation = accumulation + flux - source_flow
 # Flow equation in fracture
 
 # Full equation system
-F = fluid_equation + mechanics_equation
+F = [mechanics_equation, fluid_equation]
 
 # Initial condition
 def initial_condition_pressure(x):
@@ -207,8 +202,8 @@ def initial_condition_pressure(x):
 
 def initial_condition_displacement(x):
     return (0 * x[0], 0 * x[0])
-w_n.sub(0).interpolate(initial_condition_displacement)
-w_n.sub(1).interpolate(initial_condition_pressure)
+u_n.interpolate(initial_condition_displacement)
+p_n.interpolate(initial_condition_pressure)
 
 # Solver setup
 petsc_options = {
@@ -223,7 +218,7 @@ petsc_options = {
 }
 
 problem = multiphenicsx.fem.petsc.NonlinearProblem(
-    F, w, bcs=bc,
+    F, (u, p), bcs=bc,
     petsc_options_prefix="mixed_dimensional_", petsc_options=petsc_options,
     kind="mpi", restriction=restriction
 )
@@ -232,52 +227,53 @@ problem = multiphenicsx.fem.petsc.NonlinearProblem(
 step = 0
 utimes = []
 ptimes = []
-utimes.append(w.sub(0).collapse())
-ptimes.append(w.sub(1).collapse())
+utimes.append(u_n)
+ptimes.append(p_n)
 for _ in range(num_steps):
     t += dt
-    _ = problem.solve()
+    u, p = problem.solve()
     converged_reason = problem.solver.getConvergedReason()
     print(converged_reason)
     assert converged_reason > 0
-    w_n.x.array[:] = w.x.array  # Update solution at previous time step
-    utimes.append(w.sub(0).collapse())
-    ptimes.append(w.sub(1).collapse())
+    u_n.x.array[:] = u.x.array  # Update solution at previous time step
+    p_n.x.array[:] = p.x.array  # Update solution at previous time step
+    utimes.append(u_n)
+    ptimes.append(p_n)
     step += 1
 
 
 # Plotting
-# uplot = utimes[-1]
-# pplot = ptimes[-1]
-# u_topology, u_cell_types, u_geometry = plot.vtk_mesh(uplot.function_space)
-# u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
-# u_plotter = pv.Plotter()
+uplot = utimes[-1]
+pplot = ptimes[-1]
+u_topology, u_cell_types, u_geometry = plot.vtk_mesh(uplot.function_space)
+u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
+u_plotter = pv.Plotter()
 
-# # Map pressure dofs to the same ordering as displacement dofs, so that they can be plotted together. 
-# u_coords = uplot.function_space.tabulate_dof_coordinates()
-# p_coords = pplot.function_space.tabulate_dof_coordinates()
-# u_idx = np.lexsort(u_coords.T)
-# p_idx = np.lexsort(p_coords.T)
-# mapped_p = np.zeros_like(pplot.x.array)
-# mapped_p[u_idx] = pplot.x.array[p_idx]
+# Map pressure dofs to the same ordering as displacement dofs, so that they can be plotted together. 
+u_coords = uplot.function_space.tabulate_dof_coordinates()
+p_coords = pplot.function_space.tabulate_dof_coordinates()
+u_idx = np.lexsort(u_coords.T)
+p_idx = np.lexsort(p_coords.T)
+mapped_p = np.zeros_like(pplot.x.array)
+mapped_p[u_idx] = pplot.x.array[p_idx]
 
-# # Pad displacement vector with zero z-component
-# u = uplot.x.array.reshape((-1, mesh.geometry.dim)).copy()
-# u_3d = np.zeros((u.shape[0], 3))
-# u_3d[:, :2] = u
-# u_grid.point_data["u"] = u_3d
-# warped = u_grid.warp_by_vector("u", factor=2)
+# Pad displacement vector with zero z-component
+u = uplot.x.array.reshape((-1, mesh.geometry.dim)).copy()
+u_3d = np.zeros((u.shape[0], 3))
+u_3d[:, :2] = u
+u_grid.point_data["u"] = u_3d
+warped = u_grid.warp_by_vector("u", factor=2)
 
-# warped.point_data["p"] = mapped_p
-# u_plotter.add_mesh(
-#     warped,
-#     scalars="p",            
-#     show_edges=False,
-#     scalar_bar_args={"title": "Pressure", "vertical": True,
-#                         "title_font_size": 24, "n_labels": 6,
-#                         "position_x": 0.85, "position_y": 0.103, "height": 0.815},
-#     clim=[0, 0.196]
-# )
-# u_plotter.view_xy()
-# u_plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
-# u_plotter.show(screenshot=f"biot_no_friction.png")
+warped.point_data["p"] = mapped_p
+u_plotter.add_mesh(
+    warped,
+    scalars="p",            
+    show_edges=False,
+    scalar_bar_args={"title": "Pressure", "vertical": True,
+                        "title_font_size": 24, "n_labels": 6,
+                        "position_x": 0.85, "position_y": 0.103, "height": 0.815},
+    clim=[0, 0.196]
+)
+u_plotter.view_xy()
+u_plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
+u_plotter.show(screenshot=f"biot_no_friction.png")
