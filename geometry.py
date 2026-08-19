@@ -56,13 +56,15 @@ gmsh.model.geo.synchronize()
 # Matrix subdomains
 gmsh.model.addPhysicalGroup(2, [upper_rectangle], 1)
 gmsh.model.addPhysicalGroup(2, [lower_rectangle], 2)
-# External boundary minus the bottom
-gmsh.model.addPhysicalGroup(1, [lower_boundary_to_midpoint_right, midpoint_right_to_upper_boundary, l3, upper_boundary_to_midpoint_left, midpoint_left_to_lower_boundary], 1)
+# Right and left boundary
+gmsh.model.addPhysicalGroup(1, [lower_boundary_to_midpoint_right, midpoint_right_to_upper_boundary, upper_boundary_to_midpoint_left, midpoint_left_to_lower_boundary], 1)
 # Bottom boundary
-gmsh.model.addPhysicalGroup(1, [l1], 4)
+gmsh.model.addPhysicalGroup(1, [l1], 2) 
+# Top boundary
+gmsh.model.addPhysicalGroup(1, [l3], 3)
 # Fracture and interfaces between matrix subdomains
-gmsh.model.addPhysicalGroup(1, [mid_to_fracture_left, fracture_to_mid_right], 2)
-gmsh.model.addPhysicalGroup(1, [frac], 3)
+gmsh.model.addPhysicalGroup(1, [mid_to_fracture_left, fracture_to_mid_right], 4)
+gmsh.model.addPhysicalGroup(1, [frac], 5)
 gmsh.model.mesh.generate(2)
 
 partitioner = dolfinx.mesh.create_cell_partitioner(  # type: ignore[call-arg, unused-ignore]
@@ -81,13 +83,15 @@ mesh.topology.create_connectivity(mesh.topology.dim, mesh.topology.dim)
 cells_omega = subdomains.indices
 cells_omega_plus = subdomains.indices[subdomains.values == 1]
 cells_omega_minus = subdomains.indices[subdomains.values == 2]
-facets_partial_omega = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 1]
-facets_bottom = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 4]
-facets_interface_not_frac = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 2]
-facets_frac = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 3]
+facets_left_right = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 1]
+facets_bottom = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 2]
+facets_top = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 3]
+facets_interface_not_frac = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 4]
+facets_frac = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 5]
 
 # Define associated measures
 dx = ufl.Measure("dx", subdomain_data=subdomains)
+ds = ufl.Measure("ds", subdomain_data=boundaries_and_interfaces)
 
 # plotter = DolfinxPlotter.plot_mesh_tags(mesh, boundaries_and_interfaces, "boundaries and interfaces")
 # plotter.show(screenshot=f"mesh_boundaries_and_interfaces_test.png")
@@ -121,10 +125,6 @@ fdim = boundaries_and_interfaces.dim
 dofs_frac = fem.locate_dofs_topological(Qc, fdim, facets_frac)
 dofs_Q_omega = fem.locate_dofs_topological(Q, subdomains.dim, cells_omega)
 dofs_V_omega = fem.locate_dofs_topological(V, subdomains.dim, cells_omega)
-# dofs_Q_omega_plus = fem.locate_dofs_topological(Q, subdomains.dim, cells_omega_plus)
-# dofs_Q_omega_minus = fem.locate_dofs_topological(Q, subdomains.dim, cells_omega_minus)
-# dofs_V_omega_plus = fem.locate_dofs_topological(V, subdomains.dim, cells_omega_plus)
-# dofs_V_omega_minus = fem.locate_dofs_topological(V, subdomains.dim, cells_omega_minus)
 restriction_Qc_frac = multiphenicsx.fem.DofMapRestriction(Qc.dofmap, dofs_frac)
 restriction_Q = multiphenicsx.fem.DofMapRestriction(Q.dofmap, dofs_Q_omega)
 restriction_V = multiphenicsx.fem.DofMapRestriction(V.dofmap, dofs_V_omega)
@@ -137,8 +137,8 @@ u_D = fem.Function(V)
 p_D = fem.Function(Q)
 u_D.x.array[:] = 0
 p_D.x.array[:] = 0
-dofs_V = fem.locate_dofs_topological(V, fdim, facets_partial_omega)
-dofs_Q = fem.locate_dofs_topological(Q, fdim, facets_partial_omega)
+dofs_V = fem.locate_dofs_topological(V, fdim, facets_left_right)
+dofs_Q = fem.locate_dofs_topological(Q, fdim, facets_left_right)
 # dofs_Qc = fem.locate_dofs_topological(Qc, fdim, facets_frac)
 bc_u = fem.dirichletbc(zero_vector, dofs_V, V)
 bc_p = fem.dirichletbc(zero, dofs_Q, Q)
@@ -190,7 +190,9 @@ a = 2 * G * ufl.inner(epsilon(u), epsilon(v)) * ufl.dx + lame_lambda * ufl.inner
 b = gamma * ufl.inner(epsilon((u - u_n) / dt), epsilon(v)) * ufl.dx + gamma * ufl.inner(ufl.div((u - u_n) / dt), ufl.div(v)) * ufl.dx
 coupling_term = -alpha * ufl.inner(p, ufl.div(v)) * ufl.dx
 source_mechanics = ufl.inner(f, v) * ufl.dx
-mechanics_equation = a + b + coupling_term - source_mechanics
+trac = fem.Constant(mesh, default_scalar_type((0.0, 0)))
+neumann = ufl.inner(trac, v) * ds(3)
+mechanics_equation = a + b + coupling_term - source_mechanics - neumann
 
 # Flow equation in matrix
 x = ufl.SpatialCoordinate(mesh)
@@ -202,8 +204,9 @@ matrix_fracture_coupling = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p("+")),q(
 fluid_equation = accumulation + flux - source_flow - matrix_fracture_coupling
 
 # Flow equation in fracture
+tang = ufl.as_vector((1.0, 0.0))  # Tangent vector along the fracture, used to compute the tangential gradient along the fracture.
 accumulation_fracture = ufl.inner(c_f * g(x) * ((pc("+") - pc_n("+")) / dt) - ufl.inner(((u("+") - u_n("+") - u("-") + u_n("-")) / dt), n("+")), qc("+")) * dS
-flux_fracture = 1 / (12 * mu) * ufl.inner(g(x)**3 * ufl.grad(pc("+")), ufl.grad(qc("+"))) * dS
+flux_fracture = 1 / (12 * mu) * ufl.inner(g(x)**3 * ufl.dot(ufl.grad(pc("+")), tang), ufl.dot(ufl.grad(qc("+")), tang)) * dS
 f_fluid_fracture = fem.Constant(mesh, default_scalar_type(1))  # Mass source term
 source_flow_fracture = ufl.inner(g(x) * f_fluid_fracture, qc("+")) * dS
 matrix_fracture_coupling_2 = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p("+")), qc("+")) * dS + 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p("-")), qc("+")) * dS
@@ -299,10 +302,9 @@ warped.point_data["p"] = mapped_p
 pc_topology, pc_cell_types, pc_geometry = plot.vtk_mesh(pcplot.function_space)
 pc_grid = pv.UnstructuredGrid(pc_topology, pc_cell_types, pc_geometry)
 pc_grid.point_data["pc"] = pcplot.x.array
-print(pc_grid.point_data["pc"])
 plotter.add_mesh(
     pc_grid, show_edges=True
 )
 plotter.view_xy()
 # plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
-plotter.show(screenshot=f"biot_no_friction_loool.png")
+plotter.show(screenshot=f"mixed_biot_fracture.png")
