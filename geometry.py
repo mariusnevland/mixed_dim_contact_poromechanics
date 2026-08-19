@@ -17,7 +17,7 @@ import multiphenicsx.fem.petsc
 from dolfinx.fem.petsc import NonlinearProblem
 
 r = 3
-mesh_size = 1. / 8.
+mesh_size = 1. / 16.
 
 gmsh.initialize()
 gmsh.model.add("mesh")
@@ -92,9 +92,9 @@ dx = ufl.Measure("dx", subdomain_data=subdomains)
 # plotter = DolfinxPlotter.plot_mesh_tags(mesh, boundaries_and_interfaces, "boundaries and interfaces")
 # plotter.show(screenshot=f"mesh_boundaries_and_interfaces_test.png")
 
-# Define a custom measure on the fracture/interfaces to ensure a consistent ordering between + and - sides.
+# Define a custom measure on the fracture facets to ensure a consistent ordering between + and - sides.
 integration_entities_on_gamma = dolfinx.fem.compute_integration_domains(
-    dolfinx.fem.IntegralType.interior_facet, mesh.topology, facets_interface_not_frac)
+    dolfinx.fem.IntegralType.interior_facet, mesh.topology, facets_frac)
 integration_entities_on_gamma_reshaped = integration_entities_on_gamma.reshape(-1, 4)
 connected_cells_to_gamma = integration_entities_on_gamma_reshaped[:, [0, 2]]
 subdomain_ordering = (
@@ -105,12 +105,13 @@ if len(subdomain_ordering) > 0 and any(subdomain_ordering):
 integration_entities_on_gamma = integration_entities_on_gamma_reshaped.flatten()
 dS = ufl.Measure("dS", domain=mesh, subdomain_data=[(2, np.array(integration_entities_on_gamma, dtype=np.int32))])
 dS = dS(2)
+n = ufl.FacetNormal(mesh)
 
 
 # Function spaces
 V = fem.functionspace(mesh, ("Lagrange", 1, (mesh.geometry.dim,)))  # Space for the displacement
 Q = fem.functionspace(mesh, ("Lagrange", 1))  # Space for the matrix pressure
-Qc = Q.clone()  # Space for the fracture pressure
+Qc = fem.functionspace(mesh, ("Lagrange", 1))  # Space for the fracture pressure
 (u, p, pc) = (fem.Function(V), fem.Function(Q), fem.Function(Qc))  # Solutions
 (v, q, qc) = (ufl.TestFunction(V), ufl.TestFunction(Q), ufl.TestFunction(Qc))  # Test functions
 (u_n, p_n, pc_n) = (fem.Function(V), fem.Function(Q), fem.Function(Qc))  # Solutions at previous timestep
@@ -120,10 +121,14 @@ fdim = boundaries_and_interfaces.dim
 dofs_frac = fem.locate_dofs_topological(Qc, fdim, facets_frac)
 dofs_Q_omega = fem.locate_dofs_topological(Q, subdomains.dim, cells_omega)
 dofs_V_omega = fem.locate_dofs_topological(V, subdomains.dim, cells_omega)
+# dofs_Q_omega_plus = fem.locate_dofs_topological(Q, subdomains.dim, cells_omega_plus)
+# dofs_Q_omega_minus = fem.locate_dofs_topological(Q, subdomains.dim, cells_omega_minus)
+# dofs_V_omega_plus = fem.locate_dofs_topological(V, subdomains.dim, cells_omega_plus)
+# dofs_V_omega_minus = fem.locate_dofs_topological(V, subdomains.dim, cells_omega_minus)
 restriction_Qc_frac = multiphenicsx.fem.DofMapRestriction(Qc.dofmap, dofs_frac)
 restriction_Q = multiphenicsx.fem.DofMapRestriction(Q.dofmap, dofs_Q_omega)
 restriction_V = multiphenicsx.fem.DofMapRestriction(V.dofmap, dofs_V_omega)
-restriction = [restriction_V, restriction_Q]
+restriction = [restriction_V, restriction_Q, restriction_Qc_frac]
 
 # Define boundary conditions
 zero = dolfinx.fem.Constant(mesh, default_scalar_type(0))
@@ -134,8 +139,10 @@ u_D.x.array[:] = 0
 p_D.x.array[:] = 0
 dofs_V = fem.locate_dofs_topological(V, fdim, facets_partial_omega)
 dofs_Q = fem.locate_dofs_topological(Q, fdim, facets_partial_omega)
+# dofs_Qc = fem.locate_dofs_topological(Qc, fdim, facets_frac)
 bc_u = fem.dirichletbc(zero_vector, dofs_V, V)
 bc_p = fem.dirichletbc(zero, dofs_Q, Q)
+# bc_pc = fem.dirichletbc(zero, dofs_Qc, Qc)
 bc = [bc_u, bc_p]
 
 # Material parameters
@@ -144,6 +151,7 @@ G = 1.0  # Shear modulus (Lamé's second parameter)
 gamma = 1.0  # Viscoelastic parameter
 alpha = 1.0  # Biot coefficient
 c_0 = 1.0  # Specific storage coefficient
+c_f = 1.0  # Fluid compressibility
 mu = 1.0  # Fluid viscosity
 k = 1.0  # Permeability
 mu_fr = 1.0  # Friction coefficient
@@ -167,8 +175,8 @@ def ppos(x):   # Positive part of x, used for contact condition.
 def maximum(x, y):
     return 0.5 * (x + y + ufl.sqrt((x - y)**2))
 
-def gap(x):
-    return 0 * x[0]  # Simple, flat obstacle.
+def g(x):  # Initial fracture gap.
+    return 0.01 * x[0]
 
 def indicator_function(x):
     # Indicator function, used to distinguish between open and closed cells.
@@ -185,16 +193,24 @@ source_mechanics = ufl.inner(f, v) * ufl.dx
 mechanics_equation = a + b + coupling_term - source_mechanics
 
 # Flow equation in matrix
+x = ufl.SpatialCoordinate(mesh)
 accumulation = ufl.inner(c_0 * ((p - p_n) / dt) + alpha * ufl.div((u - u_n) / dt), q) * ufl.dx
 flux = k / mu * ufl.inner(ufl.grad(p), ufl.grad(q)) * ufl.dx
 f_fluid = fem.Constant(mesh, default_scalar_type(1))  # Mass source term
 source_flow = ufl.inner(f_fluid, q) * ufl.dx
-fluid_equation = accumulation + flux - source_flow
+matrix_fracture_coupling = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p("+")),q("+")) * dS + 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p("-")),q("-")) * dS
+fluid_equation = accumulation + flux - source_flow - matrix_fracture_coupling
 
 # Flow equation in fracture
+accumulation_fracture = ufl.inner(c_f * g(x) * ((pc("+") - pc_n("+")) / dt) - ufl.inner(((u("+") - u_n("+") - u("-") + u_n("-")) / dt), n("+")), qc("+")) * dS
+flux_fracture = 1 / (12 * mu) * ufl.inner(g(x)**3 * ufl.grad(pc("+")), ufl.grad(qc("+"))) * dS
+f_fluid_fracture = fem.Constant(mesh, default_scalar_type(1))  # Mass source term
+source_flow_fracture = ufl.inner(g(x) * f_fluid_fracture, qc("+")) * dS
+matrix_fracture_coupling_2 = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p("+")), qc("+")) * dS + 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p("-")), qc("+")) * dS
+fracture_fluid_equation = accumulation_fracture + flux_fracture - source_flow_fracture + matrix_fracture_coupling_2
 
 # Full equation system
-F = [mechanics_equation, fluid_equation]
+F = [mechanics_equation, fluid_equation, fracture_fluid_equation]
 
 # Initial condition
 def initial_condition_pressure(x):
@@ -204,7 +220,7 @@ def initial_condition_displacement(x):
     return (0 * x[0], 0 * x[0])
 u_n.interpolate(initial_condition_displacement)
 p_n.interpolate(initial_condition_pressure)
-
+pc_n.interpolate(initial_condition_pressure)
 # Solver setup
 petsc_options = {
 "snes_type": "newtonls",
@@ -218,7 +234,7 @@ petsc_options = {
 }
 
 problem = multiphenicsx.fem.petsc.NonlinearProblem(
-    F, (u, p), bcs=bc,
+    F, (u, p, pc), bcs=bc,
     petsc_options_prefix="mixed_dimensional_", petsc_options=petsc_options,
     kind="mpi", restriction=restriction
 )
@@ -227,27 +243,32 @@ problem = multiphenicsx.fem.petsc.NonlinearProblem(
 step = 0
 utimes = []
 ptimes = []
+pctimes = []
 utimes.append(u_n)
 ptimes.append(p_n)
+pctimes.append(pc_n)
 for _ in range(num_steps):
     t += dt
-    u, p = problem.solve()
+    u, p, pc = problem.solve()
     converged_reason = problem.solver.getConvergedReason()
     print(converged_reason)
     assert converged_reason > 0
     u_n.x.array[:] = u.x.array  # Update solution at previous time step
     p_n.x.array[:] = p.x.array  # Update solution at previous time step
+    pc_n.x.array[:] = pc.x.array  # Update solution at previous time step
     utimes.append(u_n)
     ptimes.append(p_n)
+    pctimes.append(pc_n)
     step += 1
 
 
 # Plotting
 uplot = utimes[-1]
 pplot = ptimes[-1]
+pcplot = pctimes[-1]
 u_topology, u_cell_types, u_geometry = plot.vtk_mesh(uplot.function_space)
 u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
-u_plotter = pv.Plotter()
+plotter = pv.Plotter()
 
 # Map pressure dofs to the same ordering as displacement dofs, so that they can be plotted together. 
 u_coords = uplot.function_space.tabulate_dof_coordinates()
@@ -265,15 +286,23 @@ u_grid.point_data["u"] = u_3d
 warped = u_grid.warp_by_vector("u", factor=2)
 
 warped.point_data["p"] = mapped_p
-u_plotter.add_mesh(
-    warped,
-    scalars="p",            
-    show_edges=False,
-    scalar_bar_args={"title": "Pressure", "vertical": True,
-                        "title_font_size": 24, "n_labels": 6,
-                        "position_x": 0.85, "position_y": 0.103, "height": 0.815},
-    clim=[0, 0.196]
+# plotter.add_mesh(
+#     warped,
+#     scalars="p",            
+#     show_edges=False,
+#     scalar_bar_args={"title": "Pressure", "vertical": True,
+#                         "title_font_size": 24, "n_labels": 6,
+#                         "position_x": 0.85, "position_y": 0.103, "height": 0.815},
+#     clim=[0, 0.196]
+# )
+
+pc_topology, pc_cell_types, pc_geometry = plot.vtk_mesh(pcplot.function_space)
+pc_grid = pv.UnstructuredGrid(pc_topology, pc_cell_types, pc_geometry)
+pc_grid.point_data["pc"] = pcplot.x.array
+print(pc_grid.point_data["pc"])
+plotter.add_mesh(
+    pc_grid, show_edges=True
 )
-u_plotter.view_xy()
-u_plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
-u_plotter.show(screenshot=f"biot_no_friction.png")
+plotter.view_xy()
+# plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
+plotter.show(screenshot=f"biot_no_friction_loool.png")
