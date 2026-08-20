@@ -34,10 +34,13 @@ l4 = gmsh.model.geo.addLine(pul, pll)
 square_loop = gmsh.model.geo.addCurveLoop([l1, l2, l3, l4])
 
 # Fracture
-pfr1 = gmsh.model.geo.addPoint(0.3, 0.5, 0.0, mesh_size)
-pfr2 = gmsh.model.geo.addPoint(0.7, 0.5, 0.0, mesh_size)
-midpoint_left = gmsh.model.geo.addPoint(0.0, 0.5, 0.0, mesh_size)
-midpoint_right = gmsh.model.geo.addPoint(1.0, 0.5, 0.0, mesh_size)
+fracx_left = 0.3
+fracx_right = 0.7
+fracy = 0.5
+pfr1 = gmsh.model.geo.addPoint(fracx_left, fracy, 0.0, mesh_size)
+pfr2 = gmsh.model.geo.addPoint(fracx_right, fracy, 0.0, mesh_size)
+midpoint_left = gmsh.model.geo.addPoint(0.0, fracy, 0.0, mesh_size)
+midpoint_right = gmsh.model.geo.addPoint(1.0, fracy, 0.0, mesh_size)
 frac = gmsh.model.geo.addLine(pfr1, pfr2)
 upper_boundary_to_midpoint_left = gmsh.model.geo.addLine(pul, midpoint_left)
 midpoint_right_to_upper_boundary = gmsh.model.geo.addLine(midpoint_right, pur)
@@ -90,7 +93,6 @@ facets_interface_not_frac = boundaries_and_interfaces.indices[boundaries_and_int
 facets_frac = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 5]
 
 # Define associated measures
-dx = ufl.Measure("dx", subdomain_data=subdomains)
 ds = ufl.Measure("ds", subdomain_data=boundaries_and_interfaces)
 
 # plotter = DolfinxPlotter.plot_mesh_tags(mesh, boundaries_and_interfaces, "boundaries and interfaces")
@@ -176,26 +178,47 @@ def maximum(x, y):
     return 0.5 * (x + y + ufl.sqrt((x - y)**2))
 
 def g(x):  # Initial fracture gap.
-    return 0.01 * x[0]
+    return 1e-4 * x[0]
 
 def indicator_function(x):
     # Indicator function, used to distinguish between open and closed cells.
     # Equals 1 if x>0, 0 if x<0 and 1/2 if x=0.
     return 0.5 * (ufl.sign(x) + 1) 
 
+# Contact condition
+x = ufl.SpatialCoordinate(mesh)
+pen = 1e6  # Penalty/stiffness parameter
+u_jump_norm = ufl.inner(n("+"), u("+") - u("-"))  # Normal jump of displacement across the fracture
+u_jump_tang = u("+") - u("-") - u_jump_norm * n("+")  # Tangential jump of displacement across the fracture
+v_jump_norm = ufl.inner(n("+"), v("+") - v("-"))
+v_jump_tang = v("+") - v("-") - v_jump_norm * n("+")
+u_jump_tang_prev = u_n("+") - u_n("-") - ufl.inner(n("+"), u_n("+") - u_n("-")) * n("+")
+norm_traction = - pen * ppos(u_jump_norm - g(x))  # Normal compliance law
+trial = pen * (u_jump_tang - u_jump_tang_prev)
+norm_trial = ufl.sqrt(ufl.inner(trial, trial) + eps)
+friction_bound = -mu_fr * norm_traction
+chi = indicator_function(-friction_bound)
+one = fem.Constant(mesh, default_scalar_type(1))
+tang_traction = ((chi - one) * friction_bound * trial) / ((chi - one) * maximum(friction_bound, norm_trial) + chi)
+friction = False
+if friction:
+    contact_condition = norm_traction * v_jump_norm * dS + ufl.inner(tang_traction, v_jump_tang) * dS   # Frictional contact condition
+else:
+    contact_condition = norm_traction * v_jump_norm * dS  # Frictionless contact condition
+
 
 # Mechanics equation
-f = fem.Constant(mesh, default_scalar_type((0, -1)))  # Source term (body force)
+f = fem.Constant(mesh, default_scalar_type((0.0, -1.0)))  # Source term (body force)
 a = 2 * G * ufl.inner(epsilon(u), epsilon(v)) * ufl.dx + lame_lambda * ufl.inner(ufl.div(u), ufl.div(v)) * ufl.dx
 b = gamma * ufl.inner(epsilon((u - u_n) / dt), epsilon(v)) * ufl.dx + gamma * ufl.inner(ufl.div((u - u_n) / dt), ufl.div(v)) * ufl.dx
 coupling_term = -alpha * ufl.inner(p, ufl.div(v)) * ufl.dx
+coupling_term_fracture = ufl.inner(pc("+"), v_jump_norm) * dS
 source_mechanics = ufl.inner(f, v) * ufl.dx
-trac = fem.Constant(mesh, default_scalar_type((0.0, 0)))
+trac = fem.Constant(mesh, default_scalar_type((0.0, 0.0)))
 neumann = ufl.inner(trac, v) * ds(3)
-mechanics_equation = a + b + coupling_term - source_mechanics - neumann
+mechanics_equation = a + b + coupling_term + coupling_term_fracture - source_mechanics - neumann - contact_condition
 
 # Flow equation in matrix
-x = ufl.SpatialCoordinate(mesh)
 accumulation = ufl.inner(c_0 * ((p - p_n) / dt) + alpha * ufl.div((u - u_n) / dt), q) * ufl.dx
 flux = k / mu * ufl.inner(ufl.grad(p), ufl.grad(q)) * ufl.dx
 f_fluid = fem.Constant(mesh, default_scalar_type(1))  # Mass source term
@@ -207,7 +230,7 @@ fluid_equation = accumulation + flux - source_flow - matrix_fracture_coupling
 tang = ufl.as_vector((1.0, 0.0))  # Tangent vector along the fracture, used to compute the tangential gradient along the fracture.
 accumulation_fracture = ufl.inner(c_f * g(x) * ((pc("+") - pc_n("+")) / dt) - ufl.inner(((u("+") - u_n("+") - u("-") + u_n("-")) / dt), n("+")), qc("+")) * dS
 flux_fracture = 1 / (12 * mu) * ufl.inner(g(x)**3 * ufl.dot(ufl.grad(pc("+")), tang), ufl.dot(ufl.grad(qc("+")), tang)) * dS
-f_fluid_fracture = fem.Constant(mesh, default_scalar_type(1))  # Mass source term
+f_fluid_fracture = fem.Constant(mesh, default_scalar_type(0))  # Mass source term
 source_flow_fracture = ufl.inner(g(x) * f_fluid_fracture, qc("+")) * dS
 matrix_fracture_coupling_2 = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p("+")), qc("+")) * dS + 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p("-")), qc("+")) * dS
 fracture_fluid_equation = accumulation_fracture + flux_fracture - source_flow_fracture + matrix_fracture_coupling_2
@@ -286,25 +309,28 @@ u = uplot.x.array.reshape((-1, mesh.geometry.dim)).copy()
 u_3d = np.zeros((u.shape[0], 3))
 u_3d[:, :2] = u
 u_grid.point_data["u"] = u_3d
-warped = u_grid.warp_by_vector("u", factor=2)
+plotter.add_mesh(
+    u_grid,
+    scalars="u",            
+    show_edges=False,
+)
 
+warped = u_grid.warp_by_vector("u", factor=1)
 warped.point_data["p"] = mapped_p
 # plotter.add_mesh(
 #     warped,
 #     scalars="p",            
 #     show_edges=False,
-#     scalar_bar_args={"title": "Pressure", "vertical": True,
-#                         "title_font_size": 24, "n_labels": 6,
-#                         "position_x": 0.85, "position_y": 0.103, "height": 0.815},
-#     clim=[0, 0.196]
 # )
-
-pc_topology, pc_cell_types, pc_geometry = plot.vtk_mesh(pcplot.function_space)
-pc_grid = pv.UnstructuredGrid(pc_topology, pc_cell_types, pc_geometry)
-pc_grid.point_data["pc"] = pcplot.x.array
-plotter.add_mesh(
-    pc_grid, show_edges=True
-)
 plotter.view_xy()
+plotter.show(screenshot=f"mixed_biot_matrix.png")
+
+# pc_topology, pc_cell_types, pc_geometry = plot.vtk_mesh(pcplot.function_space)
+# pc_grid = pv.UnstructuredGrid(pc_topology, pc_cell_types, pc_geometry)
+# pc_grid.point_data["pc"] = pcplot.x.array
+# plotter.add_mesh(
+#     pc_grid, show_edges=True
+# )
+# plotter.view_xy()
 # plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
-plotter.show(screenshot=f"mixed_biot_fracture.png")
+# plotter.show(screenshot=f"mixed_biot_fracture.png")
