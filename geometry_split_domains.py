@@ -97,7 +97,6 @@ facets_frac = boundaries_and_interfaces.indices[boundaries_and_interfaces.values
 
 # Define associated measures
 dx = ufl.Measure("dx", subdomain_data=subdomains)
-ds = ufl.Measure("ds", subdomain_data=boundaries_and_interfaces)
 
 # Define a custom measure on the fracture facets to ensure a consistent ordering between + and - sides.
 integration_entities_on_gamma = dolfinx.fem.compute_integration_domains(
@@ -112,58 +111,105 @@ if len(subdomain_ordering) > 0 and any(subdomain_ordering):
 integration_entities_on_gamma = integration_entities_on_gamma_reshaped.flatten()
 dS = ufl.Measure("dS", domain=mesh, subdomain_data=[(2, np.array(integration_entities_on_gamma, dtype=np.int32))])
 dS = dS(2)
+
+# Integration measure over the interface not including the fracture??
+integration_entities_on_gamma = dolfinx.fem.compute_integration_domains(
+    dolfinx.fem.IntegralType.interior_facet, mesh.topology, facets_interface_not_frac)
+integration_entities_on_gamma_reshaped = integration_entities_on_gamma.reshape(-1, 4)
+connected_cells_to_gamma = integration_entities_on_gamma_reshaped[:, [0, 2]]
+subdomain_ordering = (
+    subdomains.values[connected_cells_to_gamma[:, 0]] < subdomains.values[connected_cells_to_gamma[:, 1]])
+if len(subdomain_ordering) > 0 and any(subdomain_ordering):
+    integration_entities_on_gamma_reshaped[subdomain_ordering] = integration_entities_on_gamma_reshaped[
+        subdomain_ordering][:, [2, 3, 0, 1]]
+integration_entities_on_gamma = integration_entities_on_gamma_reshaped.flatten()
+dS2 = ufl.Measure("dS", domain=mesh, subdomain_data=[(2, np.array(integration_entities_on_gamma, dtype=np.int32))])
+dS2 = dS2(2)
 n = ufl.FacetNormal(mesh)
 
-# Function spaces
-V = fem.functionspace(mesh, ("Lagrange", 1, (mesh.geometry.dim,)))  # Space for the displacement
-V1 = V.clone()
-V2 = V.clone()
-V_intf = V.clone()
-Q = fem.functionspace(mesh, ("Lagrange", 1))  # Space for the matrix pressure
-Q1 = Q.clone()
-Q2 = Q.clone()
-Q_intf = Q.clone()
-Qc = Q.clone()  # Space for the fracture pressure
-(u1, p1, v1, q1) = (fem.Function(V1), fem.Function(Q1), ufl.TestFunction(V1), ufl.TestFunction(Q1))
-(u2, p2, v2, q2) = (fem.Function(V2), fem.Function(Q2), ufl.TestFunction(V2), ufl.TestFunction(Q2))
-(pc, qc) = (fem.Function(Qc), ufl.TestFunction(Qc))
-(u1_n, p1_n, u2_n, p2_n, pc_n) = (fem.Function(V1), fem.Function(Q1), fem.Function(V2), fem.Function(Q2), fem.Function(Qc))
-(u_intf, p_intf, v_intf, q_intf) = (fem.Function(V_intf), fem.Function(Q_intf), ufl.TestFunction(V_intf), ufl.TestFunction(Q_intf))  # Possibly need some sort of Lagrange multipliers on the interface (not including the fracture) to enforce continuity across these interfaces.
+# Mixed function spaces
+P1_displacement = element("Lagrange", mesh.basix_cell(), 1, shape=(mesh.geometry.dim,), dtype=default_real_type)
+P1_pressure = element("Lagrange", mesh.basix_cell(), 1, dtype=default_real_type)
+P1_frac_pressure = element("Lagrange", mesh.basix_cell(), 1, dtype=default_real_type)
+W = fem.functionspace(mesh, mixed_element([P1_displacement, P1_displacement, P1_pressure, P1_pressure, P1_frac_pressure]))
+V1_0 = W.sub(0)
+V2_0 = W.sub(1)
+Q1_0 = W.sub(2)
+Q2_0 = W.sub(3)
+Qc0 = W.sub(4)
+V1, map_V1 = V1_0.collapse()
+V2, map_V2 = V2_0.collapse()
+Q1, map_Q1 = Q1_0.collapse()
+Q2, map_Q2 = Q2_0.collapse()
+Qc, map_Qc = Qc0.collapse()
+w = fem.Function(W)  # Current solution     
+w_n = fem.Function(W)  # Solution at previous timestep
+(u1, u2, p1, p2, pc) = ufl.split(w)
+(u1_n, u2_n, p1_n, p2_n, pc_n) = ufl.split(w_n)
+(v1, v2, q1, q2, qc) = ufl.TestFunctions(W)
+
 
 # Define restrictions
 fdim = boundaries_and_interfaces.dim
-dofs_V1_Omega1 = fem.locate_dofs_topological(V1, subdomains.dim, cells_Omega1)
-dofs_V2_Omega2 = fem.locate_dofs_topological(V2, subdomains.dim, cells_Omega2)
-dofs_Q1_Omega1 = fem.locate_dofs_topological(Q1, subdomains.dim, cells_Omega1)
-dofs_Q2_Omega2 = fem.locate_dofs_topological(Q2, subdomains.dim, cells_Omega2)
-dofs_V_intf = fem.locate_dofs_topological(V_intf, fdim, facets_interface_not_frac)
-dofs_Q_intf = fem.locate_dofs_topological(Q_intf, fdim, facets_interface_not_frac)
-dofs_frac = fem.locate_dofs_topological(Qc, fdim, facets_frac)
-restriction_V1_Omega1 = multiphenicsx.fem.DofMapRestriction(V1.dofmap, dofs_V1_Omega1)
-restriction_V2_Omega2 = multiphenicsx.fem.DofMapRestriction(V2.dofmap, dofs_V2_Omega2)
-restriction_Q1_Omega1 = multiphenicsx.fem.DofMapRestriction(Q1.dofmap, dofs_V1_Omega1)
-restriction_Q2_Omega2 = multiphenicsx.fem.DofMapRestriction(Q2.dofmap, dofs_V2_Omega2)
-restriction_V_intf = multiphenicsx.fem.DofMapRestriction(V_intf.dofmap, dofs_V_intf)
-restriction_Q_intf = multiphenicsx.fem.DofMapRestriction(Q_intf.dofmap, dofs_Q_intf)
-restriction_Qc_frac = multiphenicsx.fem.DofMapRestriction(Qc.dofmap, dofs_frac)
-restriction = [restriction_V1_Omega1, restriction_V2_Omega2, restriction_Q1_Omega1, restriction_Q2_Omega2, restriction_Qc_frac]
+# Locate vector DOF BLOCKS on Omega1
+blocks_V1_Omega1 = fem.locate_dofs_topological(
+    V1,
+    subdomains.dim,
+    cells_Omega1
+)
+# Locate vector DOF BLOCKS on Omega2
+blocks_V2_Omega2 = fem.locate_dofs_topological(
+    V2,
+    subdomains.dim,
+    cells_Omega2
+)
+bs1 = V1.dofmap.index_map_bs
+bs2 = V2.dofmap.index_map_bs
+# Expand block indices -> scalar/unrolled DOF indices
+scalar_V1_Omega1 = (
+    bs1 * blocks_V1_Omega1[:, None]
+    + np.arange(bs1)
+).reshape(-1)
+
+scalar_V2_Omega2 = (
+    bs2 * blocks_V2_Omega2[:, None]
+    + np.arange(bs2)
+).reshape(-1)
+# Now map collapsed scalar DOFs -> mixed-space scalar DOFs
+dofs_V1_Omega1 = map_V1[scalar_V1_Omega1]
+dofs_V2_Omega2 = map_V2[scalar_V2_Omega2]
+dofs_Q1_Omega1 = map_Q1[fem.locate_dofs_topological(Q1, subdomains.dim, cells_Omega1)]
+dofs_Q2_Omega2 = map_Q2[fem.locate_dofs_topological(Q2, subdomains.dim, cells_Omega2)]
+dofs_Qc_frac = map_Qc[fem.locate_dofs_topological(Qc, fdim, facets_frac)]
+dofs_restricted = np.unique(
+    np.concatenate([
+        dofs_V1_Omega1,
+        dofs_V2_Omega2,
+        dofs_Q1_Omega1,
+        dofs_Q2_Omega2,
+        dofs_Qc_frac
+    ])
+).astype(np.int32)
+restriction_mixed = multiphenicsx.fem.DofMapRestriction(W.dofmap, dofs_restricted)
+restriction = [restriction_mixed]
 
 # Boundary conditions
-zero = dolfinx.fem.Constant(mesh, default_scalar_type(0))
-one = dolfinx.fem.Constant(mesh, default_scalar_type(1))
-zero_vector = dolfinx.fem.Constant(mesh, default_scalar_type((0,) * mesh.geometry.dim))
-u_D = fem.Function(V)
-p_D = fem.Function(Q)
-u_D.x.array[:] = 0
-p_D.x.array[:] = 0
-dofs_V1 = fem.locate_dofs_topological(V1, fdim, facets_top)
-dofs_V2 = fem.locate_dofs_topological(V2, fdim, facets_bottom)
-dofs_Q1 = fem.locate_dofs_topological(Q1, fdim, facets_top)
-dofs_Q2 = fem.locate_dofs_topological(Q2, fdim, facets_bottom)
-bc_u1 = fem.dirichletbc(zero_vector, dofs_V1, V1)
-bc_u2 = fem.dirichletbc(zero_vector, dofs_V2, V2)
-bc_p1 = fem.dirichletbc(one, dofs_Q1, Q1)
-bc_p2 = fem.dirichletbc(zero, dofs_Q2, Q2)
+u_D1 = fem.Function(V1)
+u_D2 = fem.Function(V2)
+p_D1 = fem.Function(Q1)
+p_D2 = fem.Function(Q2)
+u_D1.x.array[:] = 0
+u_D2.x.array[:] = 0
+p_D1.x.array[:] = 0
+p_D2.x.array[:] = 0
+dofs_V1 = fem.locate_dofs_topological((V1_0, V1), fdim, facets_top)
+dofs_V2 = fem.locate_dofs_topological((V2_0, V2), fdim, facets_bottom)
+dofs_Q1 = fem.locate_dofs_topological((Q1_0, Q1), fdim, facets_top)
+dofs_Q2 = fem.locate_dofs_topological((Q2_0, Q2), fdim, facets_bottom)
+bc_u1 = fem.dirichletbc(u_D1, dofs_V1, V1_0)
+bc_u2 = fem.dirichletbc(u_D2, dofs_V2, V2_0)
+bc_p1 = fem.dirichletbc(p_D1, dofs_Q1, Q1_0)
+bc_p2 = fem.dirichletbc(p_D2, dofs_Q2, Q2_0)
 bc = [bc_u1, bc_u2, bc_p1, bc_p2]
 
 # Material parameters
@@ -208,25 +254,25 @@ x = ufl.SpatialCoordinate(mesh)
 f = fem.Constant(mesh, default_scalar_type((0.0, 0.0)))  # Source term (body force)
 v_jump_norm = ufl.inner(n("+"), v1("+") - v2("-"))
 # Mechanics equation, the equations for Omega1 and Omega2 are added.
-A1 = 2 * G * ufl.inner(epsilon(u1), epsilon(v1)) * ufl.dx(1) + lame_lambda * ufl.inner(ufl.div(u1), ufl.div(v1)) * ufl.dx(1)
-A2 = 2 * G * ufl.inner(epsilon(u2), epsilon(v2)) * ufl.dx(2) + lame_lambda * ufl.inner(ufl.div(u2), ufl.div(v2)) * ufl.dx(2)
-B1 = gamma * ufl.inner(epsilon((u1 - u1_n) / dt), epsilon(v1)) * ufl.dx(1) + gamma * ufl.inner(ufl.div((u1 - u1_n) / dt), ufl.div(v1)) * ufl.dx(1)
-B2 = gamma * ufl.inner(epsilon((u2 - u2_n) / dt), epsilon(v2)) * ufl.dx(2) + gamma * ufl.inner(ufl.div((u2 - u2_n) / dt), ufl.div(v2)) * ufl.dx(2)
-coupling_term1 = -alpha * ufl.inner(p1, ufl.div(v1)) * ufl.dx(1)
-coupling_term2 = -alpha * ufl.inner(p2, ufl.div(v2)) * ufl.dx(2)
+A1 = 2 * G * ufl.inner(epsilon(u1), epsilon(v1)) * dx(1) + lame_lambda * ufl.inner(ufl.div(u1), ufl.div(v1)) * dx(1)
+A2 = 2 * G * ufl.inner(epsilon(u2), epsilon(v2)) * dx(2) + lame_lambda * ufl.inner(ufl.div(u2), ufl.div(v2)) * dx(2)
+B1 = gamma * ufl.inner(epsilon((u1 - u1_n) / dt), epsilon(v1)) * dx(1) + gamma * ufl.inner(ufl.div((u1 - u1_n) / dt), ufl.div(v1)) * dx(1)
+B2 = gamma * ufl.inner(epsilon((u2 - u2_n) / dt), epsilon(v2)) * dx(2) + gamma * ufl.inner(ufl.div((u2 - u2_n) / dt), ufl.div(v2)) * dx(2)
+coupling_term1 = -alpha * ufl.inner(p1, ufl.div(v1)) * dx(1)
+coupling_term2 = -alpha * ufl.inner(p2, ufl.div(v2)) * dx(2)
 coupling_term_fracture = ufl.inner(pc("+"), v_jump_norm) * dS
-source_mechanics1 = ufl.inner(f, v1) * ufl.dx(1)
-source_mechanics2 = ufl.inner(f, v2) * ufl.dx(2)
+source_mechanics1 = ufl.inner(f, v1) * dx(1)
+source_mechanics2 = ufl.inner(f, v2) * dx(2)
 mechanics_equation = A1 + A2 + B1 + B2 + coupling_term1 + coupling_term2 + coupling_term_fracture - source_mechanics1 - source_mechanics2
 
 # Mass balance in the matrix, the equations for Omega1 and Omega2 are added.
-accumulation1 = ufl.inner(c_0 * ((p1 - p1_n) / dt) + alpha * ufl.div((u1 - u1_n) / dt), q1) * ufl.dx(1)
-accumulation2 = ufl.inner(c_0 * ((p2 - p2_n) / dt) + alpha * ufl.div((u2 - u2_n) / dt), q2) * ufl.dx(2)
-flux1 = k / mu * ufl.inner(ufl.grad(p1), ufl.grad(q1)) * ufl.dx(1)
-flux2 = k / mu * ufl.inner(ufl.grad(p2), ufl.grad(q2)) * ufl.dx(2)
-f_fluid = fem.Constant(mesh, default_scalar_type(0))  # Mass source term
-source_flow1 = ufl.inner(f_fluid, q1) * ufl.dx(1)
-source_flow2 = ufl.inner(f_fluid, q2) * ufl.dx(2)
+accumulation1 = ufl.inner(c_0 * ((p1 - p1_n) / dt) + alpha * ufl.div((u1 - u1_n) / dt), q1) * dx(1)
+accumulation2 = ufl.inner(c_0 * ((p2 - p2_n) / dt) + alpha * ufl.div((u2 - u2_n) / dt), q2) * dx(2)
+flux1 = k / mu * ufl.inner(ufl.grad(p1), ufl.grad(q1)) * dx(1)
+flux2 = k / mu * ufl.inner(ufl.grad(p2), ufl.grad(q2)) * dx(2)
+f_fluid = fem.Constant(mesh, default_scalar_type(1))  # Mass source term
+source_flow1 = ufl.inner(f_fluid, q1) * dx(1)
+source_flow2 = ufl.inner(f_fluid, q2) * dx(2)
 matrix_fracture_coupling = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")),q1("+")) * dS + 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")),q2("-")) * dS
 fluid_equation = accumulation1 + accumulation2 + flux1 + flux2 - source_flow1 - source_flow2 - matrix_fracture_coupling
 
@@ -240,7 +286,7 @@ matrix_fracture_coupling_2 = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+"))
 fracture_fluid_equation = accumulation_fracture + flux_fracture - source_flow_fracture + matrix_fracture_coupling_2
 
 # Full equation system
-F = [mechanics_equation, fluid_equation, fracture_fluid_equation]
+F = mechanics_equation + fluid_equation + fracture_fluid_equation
 
 # Initial condition
 def initial_condition_pressure(x):
@@ -248,11 +294,11 @@ def initial_condition_pressure(x):
 
 def initial_condition_displacement(x):
     return (0 * x[0], 0 * x[0])
-u1_n.interpolate(initial_condition_displacement)
-p1_n.interpolate(initial_condition_pressure)
-u2_n.interpolate(initial_condition_displacement)
-p2_n.interpolate(initial_condition_pressure)
-pc_n.interpolate(initial_condition_pressure)
+w_n.sub(0).interpolate(initial_condition_displacement)
+w_n.sub(1).interpolate(initial_condition_displacement)
+w_n.sub(2).interpolate(initial_condition_pressure)
+w_n.sub(3).interpolate(initial_condition_pressure)
+w_n.sub(4).interpolate(initial_condition_pressure)
 
 # Solver setup
 petsc_options = {
@@ -267,7 +313,7 @@ petsc_options = {
 }
 
 problem = multiphenicsx.fem.petsc.NonlinearProblem(
-    F, (u1, u2, p1, p2, pc), bcs=bc,
+    [F], [w], bcs=bc,
     petsc_options_prefix="mixed_dimensional_", petsc_options=petsc_options,
     kind="mpi", restriction=restriction
 )
@@ -279,25 +325,117 @@ u2times = []
 p1times = []
 p2times = []
 pctimes = []
-u1times.append(u1_n)
-u2times.append(u2_n)
-p1times.append(p1_n)
-p2times.append(p2_n)
-pctimes.append(pc_n)
+u1times.append(w.sub(0).collapse())
+u2times.append(w.sub(1).collapse())
+p1times.append(w.sub(2).collapse())
+p2times.append(w.sub(3).collapse())
+pctimes.append(w.sub(4).collapse())
 for _ in range(num_steps):
     t += dt
-    u1, u2, p1, p2, pc = problem.solve()
+    _ = problem.solve()
     converged_reason = problem.solver.getConvergedReason()
     print(converged_reason)
     assert converged_reason > 0
-    u1_n.x.array[:] = u1.x.array  # Update solution at previous time step
-    u2_n.x.array[:] = u2.x.array
-    p1_n.x.array[:] = p1.x.array  # Update solution at previous time step
-    p2_n.x.array[:] = p2.x.array
-    pc_n.x.array[:] = pc.x.array  # Update solution at previous time step
-    u1times.append(u1_n)
-    u2times.append(u2_n)
-    p1times.append(p1_n)
-    p2times.append(p2_n)
-    pctimes.append(pc_n)
+    w_n.x.array[:] = w.x.array  # Update solution at previous time step
+    u1times.append(w.sub(0).collapse())
+    u2times.append(w.sub(1).collapse())
+    p1times.append(w.sub(2).collapse())
+    p2times.append(w.sub(3).collapse())
+    pctimes.append(w.sub(4).collapse())
     step += 1
+
+
+# # Plotting
+u1plot = u1times[-1]
+u2plot = u2times[-1]
+pplot = p1times[-1]
+pplot2 = p2times[-1]
+pcplot = pctimes[-1]
+print(pcplot.x.array)
+# u_topology, u_cell_types, u_geometry = plot.vtk_mesh(uplot.function_space)
+# u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
+# plotter = pv.Plotter()
+p_topology, p_cell_types, p_geometry = plot.vtk_mesh(pplot.function_space)
+p_grid = pv.UnstructuredGrid(p_topology, p_cell_types, p_geometry)
+plotter = pv.Plotter()
+p_grid.point_data["p"] = pplot.x.array
+plotter.add_mesh(
+    p_grid, show_edges=True
+)
+plotter.view_xy()
+plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
+plotter.show(screenshot=f"mixed_biot_matrix_upper.png")
+
+plotter = pv.Plotter()
+p_topology, p_cell_types, p_geometry = plot.vtk_mesh(pplot2.function_space)
+p_grid = pv.UnstructuredGrid(p_topology, p_cell_types, p_geometry)
+plotter = pv.Plotter()
+p_grid.point_data["p"] = pplot2.x.array
+plotter.add_mesh(
+    p_grid, show_edges=True
+)
+plotter.view_xy()
+plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
+plotter.show(screenshot=f"mixed_biot_matrix_lower.png")
+
+plotter = pv.Plotter()
+p_topology, p_cell_types, p_geometry = plot.vtk_mesh(pplot2.function_space)
+p_grid = pv.UnstructuredGrid(p_topology, p_cell_types, p_geometry)
+plotter = pv.Plotter()
+p_grid.point_data["p"] = pplot.x.array + pplot2.x.array
+plotter.add_mesh(
+    p_grid, show_edges=True
+)
+plotter.view_xy()
+plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
+plotter.show(screenshot=f"mixed_biot_matrix_sum.png")
+
+plotter = pv.Plotter()
+pc_topology, pc_cell_types, pc_geometry = plot.vtk_mesh(pcplot.function_space)
+pc_grid = pv.UnstructuredGrid(pc_topology, pc_cell_types, pc_geometry)
+pc_grid.point_data["pc"] = pcplot.x.array
+plotter.add_mesh(
+    pc_grid, show_edges=True
+)
+plotter.view_xy()
+plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
+plotter.show(screenshot=f"mixed_biot_fracture.png")
+
+# plotter = pv.Plotter()
+# u_topology, u_cell_types, u_geometry = plot.vtk_mesh(u1plot.function_space)
+# u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
+# u_grid.point_data["u"] = u1plot.x.array.reshape((-1, 2))
+# plotter.add_mesh(
+#     u_grid, scalars="u", component=0, show_edges=True
+# )
+# plotter.view_xy()
+# plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
+# plotter.show(screenshot=f"mixed_biot_disp_upper.png")
+
+# plotter = pv.Plotter()
+# u_topology, u_cell_types, u_geometry = plot.vtk_mesh(u2plot.function_space)
+# u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
+# u_grid.point_data["u"] = u2plot.x.array.reshape((-1, 2))
+# plotter.add_mesh(
+#     u_grid, scalars="u", component=0, show_edges=True
+# )
+# plotter.view_xy()
+# plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
+# plotter.show(screenshot=f"mixed_biot_disp_lower.png")
+ 
+# Pad displacement vector with zero z-component
+plotter = pv.Plotter()
+u_topology, u_cell_types, u_geometry = plot.vtk_mesh(u2plot.function_space)
+u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
+u = u2plot.x.array.reshape((-1, mesh.geometry.dim)).copy()
+u_3d = np.zeros((u.shape[0], 3))
+u_3d[:, :2] = u
+u_grid.point_data["u"] = u_3d
+warped = u_grid.warp_by_vector("u", factor=1)
+plotter.add_mesh(
+    warped,           
+    show_edges=False,
+)
+plotter.view_xy()
+plotter.show(screenshot=f"mixed_biot_disp_warped2.png")
+
