@@ -36,21 +36,26 @@ l4 = gmsh.model.geo.addLine(pul, pll)
 square_loop = gmsh.model.geo.addCurveLoop([l1, l2, l3, l4])
 
 # Fracture
-fracx_left = 0.0
-fracx_right = 1.0
+# Fracture
+fracx_left = 0.3
+fracx_right = 0.7
 fracy = 0.5
+pfr1 = gmsh.model.geo.addPoint(fracx_left, fracy, 0.0, mesh_size)
+pfr2 = gmsh.model.geo.addPoint(fracx_right, fracy, 0.0, mesh_size)
 midpoint_left = gmsh.model.geo.addPoint(0.0, fracy, 0.0, mesh_size)
 midpoint_right = gmsh.model.geo.addPoint(1.0, fracy, 0.0, mesh_size)
+frac = gmsh.model.geo.addLine(pfr1, pfr2)
 upper_boundary_to_midpoint_left = gmsh.model.geo.addLine(pul, midpoint_left)
 midpoint_right_to_upper_boundary = gmsh.model.geo.addLine(midpoint_right, pur)
 midpoint_left_to_lower_boundary = gmsh.model.geo.addLine(midpoint_left, pll)
 lower_boundary_to_midpoint_right = gmsh.model.geo.addLine(plr, midpoint_right)
-interface = gmsh.model.geo.addLine(midpoint_left, midpoint_right)
+mid_to_fracture_left = gmsh.model.geo.addLine(midpoint_left, pfr1)
+fracture_to_mid_right = gmsh.model.geo.addLine(pfr2, midpoint_right)
 
 # Matrix subdomains, split into a positive and negative side relative to the fracture
-upper_boundary = gmsh.model.geo.addCurveLoop([upper_boundary_to_midpoint_left, interface, midpoint_right_to_upper_boundary, l3])
+upper_boundary = gmsh.model.geo.addCurveLoop([upper_boundary_to_midpoint_left, mid_to_fracture_left, frac, fracture_to_mid_right, midpoint_right_to_upper_boundary, l3])
 upper_rectangle = gmsh.model.geo.addPlaneSurface([upper_boundary])
-lower_boundary = gmsh.model.geo.addCurveLoop([midpoint_left_to_lower_boundary, l1, lower_boundary_to_midpoint_right, -interface])
+lower_boundary = gmsh.model.geo.addCurveLoop([midpoint_left_to_lower_boundary, l1, lower_boundary_to_midpoint_right, -fracture_to_mid_right, -frac, -mid_to_fracture_left])
 lower_rectangle = gmsh.model.geo.addPlaneSurface([lower_boundary])
 
 gmsh.model.geo.synchronize()
@@ -66,8 +71,9 @@ gmsh.model.addPhysicalGroup(1, [l1], 3)
 # Top boundary
 gmsh.model.addPhysicalGroup(1, [l3], 4)
 # Interface between matrix subdomains
-gmsh.model.addPhysicalGroup(1, [interface], 5)
-
+# gmsh.model.addPhysicalGroup(1, [mid_to_fracture_left, fracture_to_mid_right], 5)
+# gmsh.model.addPhysicalGroup(1, [frac], 6)
+gmsh.model.addPhysicalGroup(1, [mid_to_fracture_left, frac, fracture_to_mid_right], 5)
 gmsh.model.mesh.generate(2)
 
 partitioner = dolfinx.mesh.create_cell_partitioner(  # type: ignore[call-arg, unused-ignore]
@@ -90,19 +96,21 @@ facets_left = boundaries_and_interfaces.indices[boundaries_and_interfaces.values
 facets_right = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 2]
 facets_bottom = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 3]
 facets_top = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 4]
+# facets_interface_not_frac = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 5]
+# facets_fracture = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 6]
 facets_interface = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 5]
 
 # Define associated measures
 dx = ufl.Measure("dx", subdomain_data=subdomains)
-ds = ufl.Measure("ds", subdomain_data=boundaries_and_interfaces)
 
 # Define a custom measure on the fracture facets to ensure a consistent ordering between + and - sides.
 integration_entities_on_gamma = dolfinx.fem.compute_integration_domains(
     dolfinx.fem.IntegralType.interior_facet, mesh.topology, facets_interface)
 integration_entities_on_gamma_reshaped = integration_entities_on_gamma.reshape(-1, 4)
 connected_cells_to_gamma = integration_entities_on_gamma_reshaped[:, [0, 2]]
+# Ensure Omega1 (tag 1) is the first cell, i.e. the "+" side
 subdomain_ordering = (
-    subdomains.values[connected_cells_to_gamma[:, 0]] < subdomains.values[connected_cells_to_gamma[:, 1]])
+    subdomains.values[connected_cells_to_gamma[:, 0]] > subdomains.values[connected_cells_to_gamma[:, 1]])
 if len(subdomain_ordering) > 0 and any(subdomain_ordering):
     integration_entities_on_gamma_reshaped[subdomain_ordering] = integration_entities_on_gamma_reshaped[
         subdomain_ordering][:, [2, 3, 0, 1]]
@@ -112,26 +120,35 @@ dS = dS(2)
 
 # Mixed function spaces
 P1_pressure = element("Lagrange", mesh.basix_cell(), 1, dtype=default_real_type)
-W = fem.functionspace(mesh, mixed_element([P1_pressure, P1_pressure]))
+P1_frac_pressure = element("Lagrange", mesh.basix_cell(), 1, dtype=default_real_type)
+W = fem.functionspace(mesh, mixed_element([P1_pressure, P1_pressure, P1_pressure]))
 Q1_0 = W.sub(0)
 Q2_0 = W.sub(1)
+M_0 = W.sub(2)  # Lagrange multiplier
+# Qc_0 = W.sub(2)
 Q1, map_Q1 = Q1_0.collapse()
 Q2, map_Q2 = Q2_0.collapse()
+M, map_M = M_0.collapse()
+# Qc, map_Qc = Qc_0.collapse()
 w = fem.Function(W)  # Current solution     
 w_n = fem.Function(W)  # Solution at previous timestep
-(p1, p2) = ufl.split(w)
-(p1_n, p2_n) = ufl.split(w_n)
-(q1, q2) = ufl.TestFunctions(W)
+(p1, p2, l) = ufl.split(w)
+(p1_n, p2_n, l_n) = ufl.split(w_n)
+(q1, q2, m) = ufl.TestFunctions(W)
 
 
 # Define restrictions
 fdim = boundaries_and_interfaces.dim
 dofs_Q1_Omega1 = map_Q1[fem.locate_dofs_topological(Q1, subdomains.dim, cells_Omega1)]
 dofs_Q2_Omega2 = map_Q2[fem.locate_dofs_topological(Q2, subdomains.dim, cells_Omega2)]
+dofs_M_Gamma = map_M[fem.locate_dofs_topological(M, fdim, facets_interface)]
+# dofs_Qc_frac = map_Qc[fem.locate_dofs_topological(Qc, fdim, facets_fracture)]
 dofs_restricted = np.unique(
     np.concatenate([
         dofs_Q1_Omega1,
         dofs_Q2_Omega2,
+        dofs_M_Gamma
+        # dofs_Qc_frac
     ])
 ).astype(np.int32)
 restriction_mixed = multiphenicsx.fem.DofMapRestriction(W.dofmap, dofs_restricted)
@@ -140,7 +157,7 @@ restriction = [restriction_mixed]
 # Boundary conditions
 p_D1 = fem.Function(Q1)
 p_D2 = fem.Function(Q2)
-p_D1.x.array[:] = 0
+p_D1.x.array[:] = 1
 p_D2.x.array[:] = 0
 dofs_Q1 = fem.locate_dofs_topological((Q1_0, Q1), fdim, facets_top)
 dofs_Q2 = fem.locate_dofs_topological((Q2_0, Q2), fdim, facets_bottom)
@@ -165,8 +182,12 @@ T = 1.0
 num_steps = 10
 dt = T / num_steps
 
+def g(x):  # Initial fracture gap.
+    return 1e-4 * x[0]
+
 x = ufl.SpatialCoordinate(mesh)
 n = ufl.FacetNormal(mesh)
+
 # Mass balance in the matrix, the equations for Omega1 and Omega2 are added.
 accumulation1 = ufl.inner(c_0 * ((p1 - p1_n) / dt), q1) * dx(1)
 accumulation2 = ufl.inner(c_0 * ((p2 - p2_n) / dt), q2) * dx(2)
@@ -175,7 +196,18 @@ flux2 = k / mu * ufl.inner(ufl.grad(p2), ufl.grad(q2)) * dx(2)
 f_fluid = fem.Constant(mesh, default_scalar_type(1))  # Mass source term
 source_flow1 = ufl.inner(f_fluid, q1) * dx(1)
 source_flow2 = ufl.inner(f_fluid, q2) * dx(2)
-fluid_equation = accumulation1 + accumulation2 + flux1 + flux2 - source_flow1 - source_flow2
+interface_term = ufl.inner(l("+"), q1("+") - q2("-")) * dS + ufl.inner(m("+"), p1("+") - p2("-")) * dS
+# matrix_fracture_coupling = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")),q1("+")) * dS + 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")),q2("-")) * dS
+fluid_equation = accumulation1 + accumulation2 + flux1 + flux2 - source_flow1 - source_flow2 + interface_term
+
+# Mass balance in the fracture
+# tang = ufl.as_vector((1.0, 0.0))  # Tangent vector along the fracture, used to compute the tangential gradient along the fracture.
+# accumulation_fracture = ufl.inner(c_f * g(x) * ((pc("+") - pc_n("+")) / dt), qc("+")) * dS
+# flux_fracture = 1 / (12 * mu) * ufl.inner(g(x)**3 * ufl.dot(ufl.grad(pc("+")), tang), ufl.dot(ufl.grad(qc("+")), tang)) * dS
+# f_fluid_fracture = fem.Constant(mesh, default_scalar_type(0))  # Mass source term
+# source_flow_fracture = ufl.inner(g(x) * f_fluid_fracture, qc("+")) * dS
+# matrix_fracture_coupling_2 = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")), qc("+")) * dS + 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")), qc("+")) * dS
+# fracture_fluid_equation = accumulation_fracture + flux_fracture - source_flow_fracture + matrix_fracture_coupling_2
 
 # Full equation system
 F = fluid_equation
@@ -184,6 +216,7 @@ def initial_condition_pressure(x):
     return 0 * x[0]
 w_n.sub(0).interpolate(initial_condition_pressure)
 w_n.sub(1).interpolate(initial_condition_pressure)
+w_n.sub(2).interpolate(initial_condition_pressure)
 
 # Solver setup
 petsc_options = {
@@ -195,6 +228,8 @@ petsc_options = {
 "ksp_error_if_not_converged": True,
 "ksp_type": "preonly",
 "pc_type": "lu",
+"pc_factor_mat_solver_type": "mumps",
+"mat_mumps_icntl_7": 4
 }
 
 problem = multiphenicsx.fem.petsc.NonlinearProblem(
@@ -207,9 +242,10 @@ problem = multiphenicsx.fem.petsc.NonlinearProblem(
 step = 0
 p1times = []
 p2times = []
-lagtimes = []
+pctimes = []
 p1times.append(w.sub(0).collapse())
 p2times.append(w.sub(1).collapse())
+pctimes.append(w.sub(2).collapse())
 for _ in range(num_steps):
     t += dt
     _ = problem.solve()
@@ -219,20 +255,20 @@ for _ in range(num_steps):
     w_n.x.array[:] = w.x.array  # Update solution at previous time step
     p1times.append(w.sub(0).collapse())
     p2times.append(w.sub(1).collapse())
+    pctimes.append(w.sub(2).collapse())
     step += 1
 
 
 # # Plotting
 pplot1 = p1times[-1]
 pplot2 = p2times[-1]
-print(np.max(pplot1.x.array))
-print(np.max(pplot2.x.array))
+# pcplot = pctimes[-1]
 p_topology, p_cell_types, p_geometry = plot.vtk_mesh(pplot1.function_space)
 p_grid = pv.UnstructuredGrid(p_topology, p_cell_types, p_geometry)
 plotter = pv.Plotter()
 p_grid.point_data["p"] = pplot1.x.array
 plotter.add_mesh(
-    p_grid, show_edges=True
+    p_grid, show_edges=True, clim=[0, 1]
 )
 plotter.view_xy()
 plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
@@ -244,7 +280,7 @@ p_grid = pv.UnstructuredGrid(p_topology, p_cell_types, p_geometry)
 plotter = pv.Plotter()
 p_grid.point_data["p"] = pplot2.x.array
 plotter.add_mesh(
-    p_grid, show_edges=True
+    p_grid, show_edges=True, clim=[0, 1]
 )
 plotter.view_xy()
 plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
@@ -261,3 +297,14 @@ plotter.add_mesh(
 plotter.view_xy()
 plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
 plotter.show(screenshot=f"mixed_biot_matrix_sum.png")
+
+# plotter = pv.Plotter()
+# pc_topology, pc_cell_types, pc_geometry = plot.vtk_mesh(pcplot.function_space)
+# pc_grid = pv.UnstructuredGrid(pc_topology, pc_cell_types, pc_geometry)
+# pc_grid.point_data["pc"] = pcplot.x.array
+# plotter.add_mesh(
+#     pc_grid, show_edges=True
+# )
+# plotter.view_xy()
+# plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
+# plotter.show(screenshot=f"mixed_biot_fracture.png")
