@@ -144,15 +144,43 @@ w_n = fem.Function(W)  # Solution at previous timestep
 
 # Define restrictions
 fdim = boundaries_and_interfaces.dim
-dofs_V1_Omega1 = map_V1[fem.locate_dofs_topological(V1, subdomains.dim, cells_Omega1)]
-dofs_V2_Omega2 = map_V2[fem.locate_dofs_topological(V2, subdomains.dim, cells_Omega2)]
+# Locate vector DOF BLOCKS on Omega1
+blocks_V1_Omega1 = fem.locate_dofs_topological(
+    V1,
+    subdomains.dim,
+    cells_Omega1
+)
+# Locate vector DOF BLOCKS on Omega2
+blocks_V2_Omega2 = fem.locate_dofs_topological(
+    V2,
+    subdomains.dim,
+    cells_Omega2
+)
+bs1 = V1.dofmap.index_map_bs
+bs2 = V2.dofmap.index_map_bs
+# Expand block indices -> scalar/unrolled DOF indices
+scalar_V1_Omega1 = (
+    bs1 * blocks_V1_Omega1[:, None]
+    + np.arange(bs1)
+).reshape(-1)
+
+scalar_V2_Omega2 = (
+    bs2 * blocks_V2_Omega2[:, None]
+    + np.arange(bs2)
+).reshape(-1)
+# Now map collapsed scalar DOFs -> mixed-space scalar DOFs
+dofs_V1_Omega1 = map_V1[scalar_V1_Omega1]
+dofs_V2_Omega2 = map_V2[scalar_V2_Omega2]
 dofs_restricted = np.unique(
     np.concatenate([
         dofs_V1_Omega1,
         dofs_V2_Omega2
     ])
 ).astype(np.int32)
-restriction_mixed = multiphenicsx.fem.DofMapRestriction(W.dofmap, dofs_restricted)
+restriction_mixed = multiphenicsx.fem.DofMapRestriction(
+    W.dofmap,
+    dofs_restricted
+)
 restriction = [restriction_mixed]
 
 # Boundary conditions
@@ -164,7 +192,7 @@ dofs_V1 = fem.locate_dofs_topological((V1_0, V1), fdim, facets_top)
 dofs_V2 = fem.locate_dofs_topological((V2_0, V2), fdim, facets_bottom)
 bc_u1 = fem.dirichletbc(u_D1, dofs_V1, V1_0)
 bc_u2 = fem.dirichletbc(u_D2, dofs_V2, V2_0)
-bc = [bc_u1]
+bc = [bc_u1, bc_u2]
 
 # Material parameters
 lame_lambda = 1.0  # Lamé's first parameter
@@ -175,7 +203,7 @@ c_0 = 1.0  # Specific storage coefficient
 c_f = 1.0  # Fluid compressibility
 mu = 1.0  # Fluid viscosity
 k = 1.0  # Permeability
-mu_fr = 1.0  # Friction coefficient
+mu_fr = 0.1  # Friction coefficient
 
 # Time stepping parameters
 t = 0.0
@@ -224,7 +252,7 @@ if friction:
 else:
     contact_condition = norm_traction * v_jump_norm * dS  # Frictionless contact condition
 
-f = fem.Constant(mesh, default_scalar_type((0.0, 0.0)))  # Source term (body force)
+f = fem.Constant(mesh, default_scalar_type((0.0, -1.0)))  # Source term (body force)
 # Mechanics equation, the equations for Omega1 and Omega2 are added.
 A1 = 2 * G * ufl.inner(epsilon(u1), epsilon(v1)) * dx(1) + lame_lambda * ufl.inner(ufl.div(u1), ufl.div(v1)) * dx(1)
 A2 = 2 * G * ufl.inner(epsilon(u2), epsilon(v2)) * dx(2) + lame_lambda * ufl.inner(ufl.div(u2), ufl.div(v2)) * dx(2)
@@ -232,9 +260,7 @@ B1 = gamma * ufl.inner(epsilon((u1 - u1_n) / dt), epsilon(v1)) * dx(1) + gamma *
 B2 = gamma * ufl.inner(epsilon((u2 - u2_n) / dt), epsilon(v2)) * dx(2) + gamma * ufl.inner(ufl.div((u2 - u2_n) / dt), ufl.div(v2)) * dx(2)
 source_mechanics1 = ufl.inner(f, v1) * dx(1)
 source_mechanics2 = ufl.inner(f, v2) * dx(2)
-trac = fem.Constant(mesh, default_scalar_type((0.0, -0.3)))
-neumann = ufl.inner(trac, v2) * ds(3)
-mechanics_equation = A1 + A2 + B1 + B2 - source_mechanics1 - source_mechanics2 - neumann
+mechanics_equation = A1 + A2 + B1 + B2 - source_mechanics1 - source_mechanics2 - contact_condition
 
 # Full equation system
 F = mechanics_equation
@@ -272,8 +298,9 @@ for _ in range(num_steps):
     t += dt
     _ = problem.solve()
     converged_reason = problem.solver.getConvergedReason()
-    print(converged_reason)
     assert converged_reason > 0
+    num_iterations = problem.solver.getIterationNumber()
+    print(f"Time step {step}: {converged_reason=} {num_iterations=}")
     w_n.x.array[:] = w.x.array  # Update solution at previous time step
     u1times.append(w.sub(0).collapse())
     u2times.append(w.sub(1).collapse())
