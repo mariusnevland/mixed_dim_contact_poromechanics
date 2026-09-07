@@ -99,47 +99,68 @@ facets_frac = boundaries_and_interfaces.indices[boundaries_and_interfaces.values
 dx = ufl.Measure("dx", subdomain_data=subdomains)
 ds = ufl.Measure("ds", subdomain_data=boundaries_and_interfaces)
 
-# Define a custom measure on the fracture facets to ensure a consistent ordering between + and - sides.
-integration_entities_on_gamma = dolfinx.fem.compute_integration_domains(
-    dolfinx.fem.IntegralType.interior_facet, mesh.topology, facets_frac)
-integration_entities_on_gamma_reshaped = integration_entities_on_gamma.reshape(-1, 4)
-connected_cells_to_gamma = integration_entities_on_gamma_reshaped[:, [0, 2]]
-subdomain_ordering = (
-    subdomains.values[connected_cells_to_gamma[:, 0]] < subdomains.values[connected_cells_to_gamma[:, 1]])
-if len(subdomain_ordering) > 0 and any(subdomain_ordering):
-    integration_entities_on_gamma_reshaped[subdomain_ordering] = integration_entities_on_gamma_reshaped[
-        subdomain_ordering][:, [2, 3, 0, 1]]
-integration_entities_on_gamma = integration_entities_on_gamma_reshaped.flatten()
-dS = ufl.Measure("dS", domain=mesh, subdomain_data=[(2, np.array(integration_entities_on_gamma, dtype=np.int32))])
-dS = dS(2)
+def ordered_interior_entities(facets):
 
-# Integration measure over the interface not including the fracture??
-integration_entities_on_gamma = dolfinx.fem.compute_integration_domains(
-    dolfinx.fem.IntegralType.interior_facet, mesh.topology, facets_interface_not_frac)
-integration_entities_on_gamma_reshaped = integration_entities_on_gamma.reshape(-1, 4)
-connected_cells_to_gamma = integration_entities_on_gamma_reshaped[:, [0, 2]]
-subdomain_ordering = (
-    subdomains.values[connected_cells_to_gamma[:, 0]] < subdomains.values[connected_cells_to_gamma[:, 1]])
-if len(subdomain_ordering) > 0 and any(subdomain_ordering):
-    integration_entities_on_gamma_reshaped[subdomain_ordering] = integration_entities_on_gamma_reshaped[
-        subdomain_ordering][:, [2, 3, 0, 1]]
-integration_entities_on_gamma = integration_entities_on_gamma_reshaped.flatten()
-dS2 = ufl.Measure("dS", domain=mesh, subdomain_data=[(2, np.array(integration_entities_on_gamma, dtype=np.int32))])
-dS2 = dS2(2)
-n = ufl.FacetNormal(mesh)
+    entities = dolfinx.fem.compute_integration_domains(
+        dolfinx.fem.IntegralType.interior_facet,
+        mesh.topology,
+        facets
+    )
+
+    entities = entities.reshape(-1, 4)
+
+    if len(entities) == 0:
+        return np.array([], dtype=np.int32)
+
+    connected_cells = entities[:, [0, 2]]
+
+    # We want:
+    # Omega1 (tag 1) = "+"
+    # Omega2 (tag 2) = "-"
+    swap = (
+        subdomains.values[connected_cells[:, 0]]
+        >
+        subdomains.values[connected_cells[:, 1]]
+    )
+
+    entities[swap] = entities[swap][:, [2, 3, 0, 1]]
+
+    return entities.flatten().astype(np.int32)
+
+entities_interface = ordered_interior_entities(
+    facets_interface_not_frac
+)
+
+entities_fracture = ordered_interior_entities(
+    facets_frac
+)
+dS_data = [
+    (5, entities_interface),
+    (6, entities_fracture),
+]
+
+dS_all = ufl.Measure(
+    "dS",
+    domain=mesh,
+    subdomain_data=dS_data
+)
+dS_intf = dS_all(5)
+dS_frac = dS_all(6)
 
 # Mixed function spaces
 P1_displacement = element("Lagrange", mesh.basix_cell(), 1, shape=(mesh.geometry.dim,), dtype=default_real_type)
-W = fem.functionspace(mesh, mixed_element([P1_displacement, P1_displacement]))
+W = fem.functionspace(mesh, mixed_element([P1_displacement, P1_displacement, P1_displacement]))
 V1_0 = W.sub(0)
 V2_0 = W.sub(1)
+M_0 = W.sub(2)  # Lagrange multiplier space
 V1, map_V1 = V1_0.collapse()
 V2, map_V2 = V2_0.collapse()
+M, map_M = M_0.collapse()
 w = fem.Function(W)  # Current solution     
 w_n = fem.Function(W)  # Solution at previous timestep
-(u1, u2) = ufl.split(w)
-(u1_n, u2_n) = ufl.split(w_n)
-(v1, v2) = ufl.TestFunctions(W)
+(u1, u2, l) = ufl.split(w)
+(u1_n, u2_n, l_n) = ufl.split(w_n)
+(v1, v2, m) = ufl.TestFunctions(W)
 
 
 # Define restrictions
@@ -156,8 +177,14 @@ blocks_V2_Omega2 = fem.locate_dofs_topological(
     subdomains.dim,
     cells_Omega2
 )
+blocks_M_Gamma = fem.locate_dofs_topological(
+    M,
+    fdim,
+    facets_interface_not_frac
+)
 bs1 = V1.dofmap.index_map_bs
 bs2 = V2.dofmap.index_map_bs
+bs3 = M.dofmap.index_map_bs
 # Expand block indices -> scalar/unrolled DOF indices
 scalar_V1_Omega1 = (
     bs1 * blocks_V1_Omega1[:, None]
@@ -168,13 +195,20 @@ scalar_V2_Omega2 = (
     bs2 * blocks_V2_Omega2[:, None]
     + np.arange(bs2)
 ).reshape(-1)
+
+scalar_M_Gamma = (
+    bs3 * blocks_M_Gamma[:, None]
+    + np.arange(bs3)
+).reshape(-1)
 # Now map collapsed scalar DOFs -> mixed-space scalar DOFs
 dofs_V1_Omega1 = map_V1[scalar_V1_Omega1]
 dofs_V2_Omega2 = map_V2[scalar_V2_Omega2]
+dofs_M_Gamma = map_M[scalar_M_Gamma]
 dofs_restricted = np.unique(
     np.concatenate([
         dofs_V1_Omega1,
-        dofs_V2_Omega2
+        dofs_V2_Omega2,
+        dofs_M_Gamma
     ])
 ).astype(np.int32)
 restriction_mixed = multiphenicsx.fem.DofMapRestriction(
@@ -186,7 +220,7 @@ restriction = [restriction_mixed]
 # Boundary conditions
 u_D1 = fem.Function(V1)
 u_D2 = fem.Function(V2)
-u_D1.x.array[:] = 0
+u_D1.x.array[:] = 0.01
 u_D2.x.array[:] = 0
 dofs_V1 = fem.locate_dofs_topological((V1_0, V1), fdim, facets_top)
 dofs_V2 = fem.locate_dofs_topological((V2_0, V2), fdim, facets_bottom)
@@ -203,7 +237,7 @@ c_0 = 1.0  # Specific storage coefficient
 c_f = 1.0  # Fluid compressibility
 mu = 1.0  # Fluid viscosity
 k = 1.0  # Permeability
-mu_fr = 0.1  # Friction coefficient
+mu_fr = 1.0  # Friction coefficient
 
 # Time stepping parameters
 t = 0.0
@@ -233,7 +267,8 @@ def indicator_function(x):
     return 0.5 * (ufl.sign(x) + 1) 
 
 x = ufl.SpatialCoordinate(mesh)
-pen = 1e4  # Penalty/stiffness parameter
+n = ufl.FacetNormal(mesh)
+pen = 1e6  # Penalty/stiffness parameter
 u_jump_norm = ufl.inner(n("+"), u1("+") - u2("-"))  # Normal jump of displacement across the fracture
 u_jump_tang = u1("+") - u2("-") - u_jump_norm * n("+")  # Tangential jump of displacement across the fracture
 v_jump_norm = ufl.inner(n("+"), v1("+") - v2("-"))
@@ -248,11 +283,11 @@ one = fem.Constant(mesh, default_scalar_type(1))
 tang_traction = ((chi - one) * friction_bound * trial) / ((chi - one) * maximum(friction_bound, norm_trial) + chi)
 friction = True
 if friction:
-    contact_condition = norm_traction * v_jump_norm * dS + ufl.inner(tang_traction, v_jump_tang) * dS   # Frictional contact condition
+    contact_condition = norm_traction * v_jump_norm * dS_frac + ufl.inner(tang_traction, v_jump_tang) * dS_frac   # Frictional contact condition
 else:
-    contact_condition = norm_traction * v_jump_norm * dS  # Frictionless contact condition
+    contact_condition = norm_traction * v_jump_norm * dS_frac  # Frictionless contact condition
 
-f = fem.Constant(mesh, default_scalar_type((0.0, -1.0)))  # Source term (body force)
+f = fem.Constant(mesh, default_scalar_type((0.0, 0.0)))  # Source term (body force)
 # Mechanics equation, the equations for Omega1 and Omega2 are added.
 A1 = 2 * G * ufl.inner(epsilon(u1), epsilon(v1)) * dx(1) + lame_lambda * ufl.inner(ufl.div(u1), ufl.div(v1)) * dx(1)
 A2 = 2 * G * ufl.inner(epsilon(u2), epsilon(v2)) * dx(2) + lame_lambda * ufl.inner(ufl.div(u2), ufl.div(v2)) * dx(2)
@@ -260,7 +295,8 @@ B1 = gamma * ufl.inner(epsilon((u1 - u1_n) / dt), epsilon(v1)) * dx(1) + gamma *
 B2 = gamma * ufl.inner(epsilon((u2 - u2_n) / dt), epsilon(v2)) * dx(2) + gamma * ufl.inner(ufl.div((u2 - u2_n) / dt), ufl.div(v2)) * dx(2)
 source_mechanics1 = ufl.inner(f, v1) * dx(1)
 source_mechanics2 = ufl.inner(f, v2) * dx(2)
-mechanics_equation = A1 + A2 + B1 + B2 - source_mechanics1 - source_mechanics2 - contact_condition
+interface_term = ufl.inner(l("+"), v1("+") - v2("-")) * dS_intf + ufl.inner(m("+"), u1("+") - u2("-")) * dS_intf
+mechanics_equation = A1 + A2 + B1 + B2 - source_mechanics1 - source_mechanics2 - contact_condition - interface_term
 
 # Full equation system
 F = mechanics_equation
@@ -269,6 +305,7 @@ def initial_condition_displacement(x):
     return (0 * x[0], 0 * x[0])
 w_n.sub(0).interpolate(initial_condition_displacement)
 w_n.sub(1).interpolate(initial_condition_displacement)
+w_n.sub(2).interpolate(initial_condition_displacement)
 
 # Solver setup
 petsc_options = {
@@ -280,6 +317,8 @@ petsc_options = {
 "ksp_error_if_not_converged": True,
 "ksp_type": "preonly",
 "pc_type": "lu",
+"pc_factor_mat_solver_type": "mumps",
+"mat_mumps_icntl_7": 4
 }
 
 problem = multiphenicsx.fem.petsc.NonlinearProblem(
@@ -292,8 +331,10 @@ problem = multiphenicsx.fem.petsc.NonlinearProblem(
 step = 0
 u1times = []
 u2times = []
+ltimes = []
 u1times.append(w.sub(0).collapse())
 u2times.append(w.sub(1).collapse())
+ltimes.append(w.sub(2).collapse())
 for _ in range(num_steps):
     t += dt
     _ = problem.solve()
@@ -304,6 +345,7 @@ for _ in range(num_steps):
     w_n.x.array[:] = w.x.array  # Update solution at previous time step
     u1times.append(w.sub(0).collapse())
     u2times.append(w.sub(1).collapse())
+    ltimes.append(w.sub(2).collapse())
     step += 1
 
 
@@ -316,7 +358,7 @@ u_topology, u_cell_types, u_geometry = plot.vtk_mesh(u1plot.function_space)
 u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
 u_grid.point_data["u"] = u1plot.x.array.reshape((-1, 2))
 plotter.add_mesh(
-    u_grid, scalars="u", component=1, show_edges=True
+    u_grid, scalars="u", component=0, show_edges=True
 )
 plotter.view_xy()
 plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
@@ -327,7 +369,7 @@ u_topology, u_cell_types, u_geometry = plot.vtk_mesh(u2plot.function_space)
 u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
 u_grid.point_data["u"] = u2plot.x.array.reshape((-1, 2))
 plotter.add_mesh(
-    u_grid, scalars="u", component=1, show_edges=True
+    u_grid, scalars="u", component=0, show_edges=True
 )
 plotter.view_xy()
 plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
