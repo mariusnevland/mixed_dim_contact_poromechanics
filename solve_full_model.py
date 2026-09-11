@@ -16,7 +16,8 @@ import multiphenicsx.fem
 import multiphenicsx.fem.petsc
 from dolfinx.fem.petsc import NonlinearProblem
 
-def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps, plot_sol=False, friction=False):
+def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, 
+                     num_steps, plot_sol=False, friction=False):
 
     # Time stepping parameters
     t = 0.0
@@ -200,7 +201,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, nu
     bc_u2 = fem.dirichletbc(u_D2, dofs_V2, V2_0)
     bc_p1 = fem.dirichletbc(p_D1, dofs_Q1, Q1_0)
     bc_p2 = fem.dirichletbc(p_D2, dofs_Q2, Q2_0)
-    bc = [bc_u1, bc_u2, bc_p1, bc_p2]
+    bc = [bc_u2, bc_p2]
 
     # Material parameters
     lame_lambda = 1.0  # Lamé's first parameter
@@ -211,7 +212,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, nu
     c_f = 1.0  # Fluid compressibility
     mu = 1.0  # Fluid viscosity
     k = 1.0  # Permeability
-    mu_fr = 2.0  # Friction coefficient
+    mu_fr = 110.0  # Friction coefficient
 
     # Useful funcions
     eps = fem.Constant(mesh, default_scalar_type(1e-10))
@@ -269,27 +270,27 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, nu
     trac = fem.Constant(mesh, default_scalar_type((0.1, 0)))
     neumann = ufl.inner(trac, v1) * ds(4)
     interface_term = ufl.inner(lu("+"), v1("+") - v2("-")) * dS_intf + ufl.inner(mv("+"), u1("+") - u2("-")) * dS_intf
-    mechanics_equation = A1 + A2 + B1 + B2 + coupling_term1 + coupling_term2 + coupling_term_fracture - source_mechanics1 - source_mechanics2 - interface_term - contact_condition
+    mechanics_equation = A1 + A2 + B1 + B2 + coupling_term1 + coupling_term2 + coupling_term_fracture - source_mechanics1 - source_mechanics2 - interface_term - contact_condition - neumann
 
     # Mass balance in the matrix, the equations for Omega1 and Omega2 are added.
     accumulation1 = ufl.inner(c_0 * ((p1 - p1_n) / dt) + alpha * ufl.div((u1 - u1_n) / dt), q1) * dx(1)
     accumulation2 = ufl.inner(c_0 * ((p2 - p2_n) / dt) + alpha * ufl.div((u2 - u2_n) / dt), q2) * dx(2)
     flux1 = k / mu * ufl.inner(ufl.grad(p1), ufl.grad(q1)) * dx(1)
     flux2 = k / mu * ufl.inner(ufl.grad(p2), ufl.grad(q2)) * dx(2)
-    f_fluid = fem.Constant(mesh, default_scalar_type(1))  # Mass source term
+    f_fluid = fem.Constant(mesh, default_scalar_type(0))  # Mass source term
     source_flow1 = ufl.inner(f_fluid, q1) * dx(1)
     source_flow2 = ufl.inner(f_fluid, q2) * dx(2)
     interface_term = ufl.inner(lp("+"), q1("+") - q2("-")) * dS_intf + ufl.inner(mq("+"), p1("+") - p2("-")) * dS_intf
-    matrix_fracture_coupling = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")),q1("+")) * dS_frac + 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")),q2("-")) * dS_frac
+    matrix_fracture_coupling = 1e9 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")),q1("+")) * dS_frac + 1e9 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")),q2("-")) * dS_frac
     fluid_equation = accumulation1 + accumulation2 + flux1 + flux2 - source_flow1 - source_flow2 + interface_term - matrix_fracture_coupling
 
     # Mass balance in the fracture
     tang = ufl.as_vector((1.0, 0.0))  # Tangent vector along the fracture, used to compute the tangential gradient along the fracture.
     accumulation_fracture = ufl.inner(c_f * g(x) * ((pc("+") - pc_n("+")) / dt) - ufl.inner(((u1("+") - u1_n("+") - u2("-") + u2_n("-")) / dt), n("+")), qc("+")) * dS_frac
     flux_fracture = 1 / (12 * mu) * ufl.inner(g(x)**3 * ufl.dot(ufl.grad(pc("+")), tang), ufl.dot(ufl.grad(qc("+")), tang)) * dS_frac
-    f_fluid_fracture = fem.Constant(mesh, default_scalar_type(0))  # Mass source term
+    f_fluid_fracture = fem.Constant(mesh, default_scalar_type(1e4))  # Mass source term
     source_flow_fracture = ufl.inner(g(x) * f_fluid_fracture, qc("+")) * dS_frac
-    matrix_fracture_coupling_2 = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")), qc("+")) * dS_frac + 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")), qc("+")) * dS_frac
+    matrix_fracture_coupling_2 = 1e9 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")), qc("+")) * dS_frac + 1e9 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")), qc("+")) * dS_frac
     fracture_fluid_equation = accumulation_fracture + flux_fracture - source_flow_fracture + matrix_fracture_coupling_2
 
     # Full equation system
@@ -297,8 +298,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, nu
 
     # Initial condition
     def initial_condition_pressure(x):
-        return 0 * x[0]
-
+        return x[1]
     def initial_condition_displacement(x):
         return (0 * x[0], 0 * x[0])
     w_n.sub(0).interpolate(initial_condition_displacement)
@@ -323,6 +323,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, nu
     "mat_mumps_icntl_7": 4
     }
 
+    w.x.array[:] = w_n.x.array
     problem = multiphenicsx.fem.petsc.NonlinearProblem(
         [F], [w], bcs=bc,
         petsc_options_prefix="mixed_dimensional_", petsc_options=petsc_options,
@@ -423,7 +424,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, nu
     u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
     u_grid.point_data["u"] = u1plot.x.array.reshape((-1, 2))
     plotter.add_mesh(
-        u_grid, scalars="u", component=0, show_edges=True
+        u_grid, scalars="u", component=0, show_edges=True, clim=[0, 0.0424]
     )
     plotter.view_xy()
     plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
@@ -434,7 +435,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, nu
     u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
     u_grid.point_data["u"] = u2plot.x.array.reshape((-1, 2))
     plotter.add_mesh(
-        u_grid, scalars="u", component=0, show_edges=True
+        u_grid, scalars="u", component=0, show_edges=True, clim=[0, 0.0424]
     )
     plotter.view_xy()
     plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
