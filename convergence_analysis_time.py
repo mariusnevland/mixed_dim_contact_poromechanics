@@ -24,76 +24,76 @@ pc_sols = []
 mesh, subdomains, boundaries_and_interfaces = create_initial_mesh(mesh_size)
 
 # Compute solution for a sequence of progressively smaller time steps.
-# for i in range(num_refinements):
-#     _, _, _, _, _, u1, u2, p1, p2, pc = solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps[i])
-#     u1_sols.append(u1)
-#     u2_sols.append(u2)
-#     p1_sols.append(p1)
-#     p2_sols.append(p2)
-#     pc_sols.append(pc)
+for i in range(num_refinements):
+    _, _, _, _, _, u1, u2, p1, p2, pc = solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps[i])
+    u1_sols.append(u1)
+    u2_sols.append(u2)
+    p1_sols.append(p1)
+    p2_sols.append(p2)
+    pc_sols.append(pc)
 
-# # Compute reference solution using a very small time step.
-# num_steps_final = 6 * num_steps[-1]
-# _, _, _, _, _, u1_fine, u2_fine, p1_fine, p2_fine, pc_fine = solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps_final)
-# EL2u = np.zeros(len(u1_sols), dtype=default_scalar_type)
-# EL2p = np.zeros(len(p1_sols), dtype=default_scalar_type)
-# EH1u = np.zeros(len(u1_sols), dtype=default_scalar_type)
-# EH1p = np.zeros(len(p1_sols), dtype=default_scalar_type)
-# EH1pc = np.zeros(len(pc_sols), dtype=default_scalar_type)
-# dx = ufl.Measure("dx", domain=mesh, subdomain_data=subdomains)
-# ds = ufl.Measure("ds", domain=mesh, subdomain_data=boundaries_and_interfaces)
+# Compute reference solution using a very small time step.
+num_steps_final = 6 * num_steps[-1]
+_, _, _, _, _, u1_fine, u2_fine, p1_fine, p2_fine, pc_fine = solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps_final)
+EL2u = np.zeros(len(u1_sols), dtype=default_scalar_type)
+EL2p = np.zeros(len(p1_sols), dtype=default_scalar_type)
+EH1u = np.zeros(len(u1_sols), dtype=default_scalar_type)
+EH1p = np.zeros(len(p1_sols), dtype=default_scalar_type)
+EH1pc = np.zeros(len(pc_sols), dtype=default_scalar_type)
+dx = ufl.Measure("dx", domain=mesh, subdomain_data=subdomains)
+ds = ufl.Measure("ds", domain=mesh, subdomain_data=boundaries_and_interfaces)
 
-# # Compute orders of convergence.
-# for i, (u1, u2, p1, p2, pc) in enumerate(zip(u1_sols, u2_sols, p1_sols, p2_sols, pc_sols)):
-#     max_err_L2_p = 0
-#     max_err_H1_u = 0
-#     error_grad_p = 0
-#     max_err_L2_pc = 0
-#     error_grad_pc = 0
-#     for m in range(len(u1)-1):  
-#         n = int((m + 1) * num_steps_final / num_steps[i])  # These are the discrete time points that the solution shares with the reference solution.
+# Compute orders of convergence.
+for i, (u1, u2, p1, p2, pc) in enumerate(zip(u1_sols, u2_sols, p1_sols, p2_sols, pc_sols)):
+    max_err_L2_p = 0
+    max_err_H1_u = 0
+    error_grad_p = 0
+    max_err_L2_pc = 0
+    error_grad_pc = 0
+    for m in range(len(u1)-1):  
+        n = int((m + 1) * num_steps_final / num_steps[i])  # These are the discrete time points that the solution shares with the reference solution.
 
-#         # Pressure H1-error
-#         error_L2_p = form((p1[m + 1] - p1_fine[n]) ** 2 * dx(1) + (p2[m + 1] - p2_fine[n]) ** 2 * dx(2))
-#         error_L2_p = np.sqrt(assemble_scalar(error_L2_p))
-#         max_err_L2_p = max(max_err_L2_p, error_L2_p)
-#         error_grad_p_form = form(ufl.inner(ufl.grad(p1[m+1] - p1_fine[n]), ufl.grad(p1[m+1] - p1_fine[n])) * dx(1) + ufl.inner(ufl.grad(p2[m+1] - p2_fine[n]), ufl.grad(p2[m+1] - p2_fine[n])) * dx(2))
-#         error_grad_p += assemble_scalar(error_grad_p_form)
+        # Pressure H1-error
+        error_L2_p = form((p1[m + 1] - p1_fine[n]) ** 2 * dx(1) + (p2[m + 1] - p2_fine[n]) ** 2 * dx(2))
+        error_L2_p = np.sqrt(assemble_scalar(error_L2_p))
+        max_err_L2_p = max(max_err_L2_p, error_L2_p)
+        error_grad_p_form = form(ufl.inner(ufl.grad(p1[m+1] - p1_fine[n]), ufl.grad(p1[m+1] - p1_fine[n])) * dx(1) + ufl.inner(ufl.grad(p2[m+1] - p2_fine[n]), ufl.grad(p2[m+1] - p2_fine[n])) * dx(2))
+        error_grad_p += assemble_scalar(error_grad_p_form)
 
-#         # Displacement H1-error
-#         error_L2_u = form(ufl.dot(u1[m + 1] - u1_fine[n], u1[m + 1] - u1_fine[n]) * dx(1) + ufl.dot(u2[m + 1] - u2_fine[n], u2[m + 1] - u2_fine[n]) * dx(2))
-#         error_L2_u_squared = assemble_scalar(error_L2_u)
-#         error_grad_u = form(ufl.inner(ufl.grad(u1[m + 1] - u1_fine[n]), ufl.grad(u1[m + 1] - u1_fine[n])) * dx(1) + ufl.inner(ufl.grad(u2[m + 1] - u2_fine[n]), ufl.grad(u2[m + 1] - u2_fine[n])) * dx(2))
-#         error_grad_u_squared = assemble_scalar(error_grad_u)
-#         error_H1_u = np.sqrt(error_L2_u_squared + error_grad_u_squared)
-#         max_err_H1_u = max(max_err_H1_u, error_H1_u)
+        # Displacement H1-error
+        error_L2_u = form(ufl.dot(u1[m + 1] - u1_fine[n], u1[m + 1] - u1_fine[n]) * dx(1) + ufl.dot(u2[m + 1] - u2_fine[n], u2[m + 1] - u2_fine[n]) * dx(2))
+        error_L2_u_squared = assemble_scalar(error_L2_u)
+        error_grad_u = form(ufl.inner(ufl.grad(u1[m + 1] - u1_fine[n]), ufl.grad(u1[m + 1] - u1_fine[n])) * dx(1) + ufl.inner(ufl.grad(u2[m + 1] - u2_fine[n]), ufl.grad(u2[m + 1] - u2_fine[n])) * dx(2))
+        error_grad_u_squared = assemble_scalar(error_grad_u)
+        error_H1_u = np.sqrt(error_L2_u_squared + error_grad_u_squared)
+        max_err_H1_u = max(max_err_H1_u, error_H1_u)
 
-#         # Fracture pressure H1-error
-#         error_L2_pc = form((pc[m + 1] - pc_fine[n]) ** 2 * ds(6))
-#         error_L2_pc = np.sqrt(assemble_scalar(error_L2_pc))
-#         max_err_L2_pc = max(max_err_L2_pc, error_L2_pc)
-#         tang = ufl.as_vector((1.0, 0.0))  # Tangent vector along the fracture, used to compute the tangential gradient along the fracture.
-#         error_grad_pc_form = form(ufl.inner(ufl.dot(tang, ufl.grad(pc[m+1] - pc_fine[n])), ufl.dot(tang, ufl.grad(pc[m+1] - pc_fine[n]))) * ds(6))
-#         error_grad_pc += assemble_scalar(error_grad_pc_form)
+        # Fracture pressure H1-error
+        error_L2_pc = form((pc[m + 1] - pc_fine[n]) ** 2 * ds(6))
+        error_L2_pc = np.sqrt(assemble_scalar(error_L2_pc))
+        max_err_L2_pc = max(max_err_L2_pc, error_L2_pc)
+        tang = ufl.as_vector((1.0, 0.0))  # Tangent vector along the fracture, used to compute the tangential gradient along the fracture.
+        error_grad_pc_form = form(ufl.inner(ufl.dot(tang, ufl.grad(pc[m+1] - pc_fine[n])), ufl.dot(tang, ufl.grad(pc[m+1] - pc_fine[n]))) * ds(6))
+        error_grad_pc += assemble_scalar(error_grad_pc_form)
 
-#     EH1u[i] = max_err_H1_u
-#     EH1p[i] = max_err_L2_p + np.sqrt(final_time / num_steps[i] * error_grad_p)
-#     EH1pc[i] = max_err_L2_pc + np.sqrt(final_time / num_steps[i] * error_grad_pc)
-# print(f"H1-errors displacement: {EH1u}")
-# print(f"H1-errors pressure: {EH1p}")
-# print(f"H1-errors fracture pressure: {EH1pc}")
-# rates_H1_u = np.log(EH1u[1:] / EH1u[:-1]) / np.log(num_steps[:-1] / num_steps[1:])
-# rates_H1_p = np.log(EH1p[1:] / EH1p[:-1]) / np.log(num_steps[:-1] / num_steps[1:])
-# rates_H1_pc = np.log(EH1pc[1:] / EH1pc[:-1]) / np.log(num_steps[:-1] / num_steps[1:])
-# print(f"H1-rates displacement: {rates_H1_u}")
-# print(f"H1-rates pressure: {rates_H1_p}")
-# print(f"H1-rates fracture pressure: {rates_H1_pc}")
+    EH1u[i] = max_err_H1_u
+    EH1p[i] = max_err_L2_p + np.sqrt(final_time / num_steps[i] * error_grad_p)
+    EH1pc[i] = max_err_L2_pc + np.sqrt(final_time / num_steps[i] * error_grad_pc)
+print(f"H1-errors displacement: {EH1u}")
+print(f"H1-errors pressure: {EH1p}")
+print(f"H1-errors fracture pressure: {EH1pc}")
+rates_H1_u = np.log(EH1u[1:] / EH1u[:-1]) / np.log(num_steps[:-1] / num_steps[1:])
+rates_H1_p = np.log(EH1p[1:] / EH1p[:-1]) / np.log(num_steps[:-1] / num_steps[1:])
+rates_H1_pc = np.log(EH1pc[1:] / EH1pc[:-1]) / np.log(num_steps[:-1] / num_steps[1:])
+print(f"H1-rates displacement: {rates_H1_u}")
+print(f"H1-rates pressure: {rates_H1_p}")
+print(f"H1-rates fracture pressure: {rates_H1_pc}")
 
 # Plot errors.
 fig, ax = plt.subplots()
-EH1u = np.array([0.00811409, 0.00443848, 0.00235179, 0.00122287, 0.00062365, 0.00030456])
-EH1p = np.array([0.04197223, 0.02787593, 0.01905794, 0.01196893, 0.0071234, 0.004023])
-EH1pc = np.array([0.00456853, 0.003088, 0.00235139, 0.0017057, 0.00101868, 0.00074327])
+# EH1u = np.array([0.00811409, 0.00443848, 0.00235179, 0.00122287, 0.00062365, 0.00030456])
+# EH1p = np.array([0.04197223, 0.02787593, 0.01905794, 0.01196893, 0.0071234, 0.004023])
+# EH1pc = np.array([0.00456853, 0.003088, 0.00235139, 0.0017057, 0.00101868, 0.00074327])
 ax.loglog(num_steps, EH1u, marker='o', color='red')
 ax.loglog(num_steps, EH1p, marker='o', color='blue')
 ax.loglog(num_steps, EH1pc, marker='o', color='black')
