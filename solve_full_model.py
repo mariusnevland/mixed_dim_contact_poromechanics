@@ -11,13 +11,15 @@ import pyvista as pv
 pv.off_screen = True
 from viskex import DolfinxPlotter
 from basix.ufl import element, mixed_element
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib import pyplot as plt
 
 import multiphenicsx.fem
 import multiphenicsx.fem.petsc
 from dolfinx.fem.petsc import NonlinearProblem
 
 def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, 
-                     num_steps, plot_sol=False, friction=False):
+                     num_steps, plot_sol=False, friction=True):
 
     # Time stepping parameters
     t = 0.0
@@ -183,13 +185,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     u_D2 = fem.Function(V2)
     p_D1 = fem.Function(Q1)
     p_D2 = fem.Function(Q2)
-    u_D1.interpolate(
-    lambda x: np.vstack((
-        0.0 * np.ones(x.shape[1]),
-        0.0 * np.ones(x.shape[1])
-    ))
-)
-    # u_D1.x.array[:] = 0
+    u_D1.x.array[:] = 0
     u_D2.x.array[:] = 0
     p_D1.x.array[:] = 0
     p_D2.x.array[:] = 0
@@ -212,7 +208,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     c_f = 1.0  # Fluid compressibility
     mu = 1.0  # Fluid viscosity
     k = 1.0  # Permeability
-    mu_fr = 110.0  # Friction coefficient
+    mu_fr = 1.0  # Friction coefficient
 
     # Useful funcions
     eps = fem.Constant(mesh, default_scalar_type(1e-10))
@@ -267,7 +263,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     coupling_term_fracture = ufl.inner(pc("+"), v_jump_norm) * dS_frac
     source_mechanics1 = ufl.inner(f, v1) * dx(1)
     source_mechanics2 = ufl.inner(f, v2) * dx(2)
-    trac = fem.Constant(mesh, default_scalar_type((0.1, 0)))
+    trac = fem.Constant(mesh, default_scalar_type((0.01, 0)))
     neumann = ufl.inner(trac, v1) * ds(4)
     interface_term = ufl.inner(lu("+"), v1("+") - v2("-")) * dS_intf + ufl.inner(mv("+"), u1("+") - u2("-")) * dS_intf
     mechanics_equation = A1 + A2 + B1 + B2 + coupling_term1 + coupling_term2 + coupling_term_fracture - source_mechanics1 - source_mechanics2 - interface_term - contact_condition - neumann
@@ -281,16 +277,16 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     source_flow1 = ufl.inner(f_fluid, q1) * dx(1)
     source_flow2 = ufl.inner(f_fluid, q2) * dx(2)
     interface_term = ufl.inner(lp("+"), q1("+") - q2("-")) * dS_intf + ufl.inner(mq("+"), p1("+") - p2("-")) * dS_intf
-    matrix_fracture_coupling = 1e9 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")),q1("+")) * dS_frac + 1e9 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")),q2("-")) * dS_frac
+    matrix_fracture_coupling = 1e5 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")),q1("+")) * dS_frac + 1e5 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")),q2("-")) * dS_frac
     fluid_equation = accumulation1 + accumulation2 + flux1 + flux2 - source_flow1 - source_flow2 + interface_term - matrix_fracture_coupling
 
     # Mass balance in the fracture
     tang = ufl.as_vector((1.0, 0.0))  # Tangent vector along the fracture, used to compute the tangential gradient along the fracture.
     accumulation_fracture = ufl.inner(c_f * g(x) * ((pc("+") - pc_n("+")) / dt) - ufl.inner(((u1("+") - u1_n("+") - u2("-") + u2_n("-")) / dt), n("+")), qc("+")) * dS_frac
     flux_fracture = 1 / (12 * mu) * ufl.inner(g(x)**3 * ufl.dot(ufl.grad(pc("+")), tang), ufl.dot(ufl.grad(qc("+")), tang)) * dS_frac
-    f_fluid_fracture = fem.Constant(mesh, default_scalar_type(1e4))  # Mass source term
+    f_fluid_fracture = fem.Constant(mesh, default_scalar_type(1e3))  # Mass source term
     source_flow_fracture = ufl.inner(g(x) * f_fluid_fracture, qc("+")) * dS_frac
-    matrix_fracture_coupling_2 = 1e9 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")), qc("+")) * dS_frac + 1e9 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")), qc("+")) * dS_frac
+    matrix_fracture_coupling_2 = 1e5 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")), qc("+")) * dS_frac + 1e5 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")), qc("+")) * dS_frac
     fracture_fluid_equation = accumulation_fracture + flux_fracture - source_flow_fracture + matrix_fracture_coupling_2
 
     # Full equation system
@@ -298,7 +294,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
 
     # Initial condition
     def initial_condition_pressure(x):
-        return x[1]
+        return 0.05 * x[1]
     def initial_condition_displacement(x):
         return (0 * x[0], 0 * x[0])
     w_n.sub(0).interpolate(initial_condition_displacement)
@@ -370,42 +366,76 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     pplot1 = p1times[-1]
     pplot2 = p2times[-1]
     pcplot = pctimes[-1]
-    # u_topology, u_cell_types, u_geometry = plot.vtk_mesh(uplot.function_space)
-    # u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
-    # plotter = pv.Plotter()
-    p_topology, p_cell_types, p_geometry = plot.vtk_mesh(pplot1.function_space)
-    p_grid = pv.UnstructuredGrid(p_topology, p_cell_types, p_geometry)
-    plotter = pv.Plotter()
-    p_grid.point_data["p"] = pplot1.x.array
-    plotter.add_mesh(
-        p_grid, show_edges=True
+    # Locate displacement DOF blocks on the fracture
+    blocks_u1_frac = fem.locate_dofs_topological(
+        u1plot.function_space,
+        fdim,
+        facets_frac
     )
-    plotter.view_xy()
-    plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
-    plotter.show(screenshot=f"mixed_biot_matrix_upper.png")
+
+    blocks_u2_frac = fem.locate_dofs_topological(
+        u2plot.function_space,
+        fdim,
+        facets_frac
+    )
+
+    bs1 = u1plot.function_space.dofmap.index_map_bs
+    bs2 = u2plot.function_space.dofmap.index_map_bs
+
+    # Expand block indices to scalar component indices
+    dofs_u1_frac = (
+        bs1 * blocks_u1_frac[:, None] + np.arange(bs1)
+    ).reshape(-1)
+
+    dofs_u2_frac = (
+        bs2 * blocks_u2_frac[:, None] + np.arange(bs2)
+    ).reshape(-1)
+
+    # Reshape vector values
+    u1_vals = u1plot.x.array[dofs_u1_frac].reshape(-1, bs1)
+    u2_vals = u2plot.x.array[dofs_u2_frac].reshape(-1, bs2)
+
+    # Horizontal fracture: tangent = (1, 0)
+    jump_tang = u1_vals[:, 0] - u2_vals[:, 0]
+
+    print("Tangential displacement jump:")
+    print(jump_tang)
+
+    coolwarm = plt.get_cmap("coolwarm")
+
+    cmap = LinearSegmentedColormap.from_list(
+        "modified_coolwarm",
+        [
+            (0.00, coolwarm(0.00)),
+            (0.15, coolwarm(0.40)),
+            (0.25, coolwarm(0.55)),
+            (0.40, coolwarm(0.75)),
+            (0.55, coolwarm(0.90)),
+            (1.00, coolwarm(1.00)),
+        ]
+    )
 
     plotter = pv.Plotter()
     p_topology, p_cell_types, p_geometry = plot.vtk_mesh(pplot2.function_space)
     p_grid = pv.UnstructuredGrid(p_topology, p_cell_types, p_geometry)
-    plotter = pv.Plotter()
-    p_grid.point_data["p"] = pplot2.x.array
+    pplot2_modified = fem.Function(pplot2.function_space)
+    pplot2_modified.x.array[:] = pplot2.x.array
+    dofs_intf_frac = fem.locate_dofs_topological(
+            pplot2.function_space,
+            fdim,
+            np.concatenate([facets_frac, facets_interface_not_frac])
+    )
+    pplot2_modified.x.array[dofs_intf_frac] = 0.0
+    p_combined = fem.Function(pplot1.function_space)
+    p_combined.x.array[:] = pplot1.x.array + pplot2_modified.x.array
+    p_grid.point_data["p"] = p_combined.x.array
     plotter.add_mesh(
-        p_grid, show_edges=True
+        p_grid, show_edges=False, clim=[0, 0.0335], cmap="coolwarm",
+        scalar_bar_args={"title": r"$p$", "vertical": True,
+                    "title_font_size": 24, "n_labels": 6,
+                    "position_x": 0.8, "position_y": 0.103, "height": 0.815}
     )
     plotter.view_xy()
-    plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
-    plotter.show(screenshot=f"mixed_biot_matrix_lower.png")
-
-    plotter = pv.Plotter()
-    p_topology, p_cell_types, p_geometry = plot.vtk_mesh(pplot2.function_space)
-    p_grid = pv.UnstructuredGrid(p_topology, p_cell_types, p_geometry)
-    plotter = pv.Plotter()
-    p_grid.point_data["p"] = pplot1.x.array + pplot2.x.array
-    plotter.add_mesh(
-        p_grid, show_edges=True
-    )
-    plotter.view_xy()
-    plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
     plotter.show(screenshot=f"mixed_biot_matrix_sum.png")
 
     plotter = pv.Plotter()
@@ -416,7 +446,6 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
         pc_grid, show_edges=True
     )
     plotter.view_xy()
-    plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
     plotter.show(screenshot=f"mixed_biot_fracture.png")
 
     plotter = pv.Plotter()
@@ -424,10 +453,9 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
     u_grid.point_data["u"] = u1plot.x.array.reshape((-1, 2))
     plotter.add_mesh(
-        u_grid, scalars="u", component=0, show_edges=True, clim=[0, 0.0424]
+        u_grid, scalars="u", component=0, show_edges=True
     )
     plotter.view_xy()
-    plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
     plotter.show(screenshot=f"mixed_biot_disp_upper.png")
 
     plotter = pv.Plotter()
@@ -435,26 +463,37 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
     u_grid.point_data["u"] = u2plot.x.array.reshape((-1, 2))
     plotter.add_mesh(
-        u_grid, scalars="u", component=0, show_edges=True, clim=[0, 0.0424]
+        u_grid, scalars="u", component=0, show_edges=True
     )
     plotter.view_xy()
-    plotter.show_bounds(xtitle=" ", ytitle=" ", bounds=(0, 1, 0, 1, 0, 0))
     plotter.show(screenshot=f"mixed_biot_disp_lower.png")
-    
-    # Pad displacement vector with zero z-component
-    # plotter = pv.Plotter()
-    # u_topology, u_cell_types, u_geometry = plot.vtk_mesh(u2plot.function_space)
-    # u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
-    # u = u2plot.x.array.reshape((-1, mesh.geometry.dim)).copy()
-    # u_3d = np.zeros((u.shape[0], 3))
-    # u_3d[:, :2] = u
-    # u_grid.point_data["u"] = u_3d
-    # warped = u_grid.warp_by_vector("u", factor=1)
-    # plotter.add_mesh(
-    #     warped,           
-    #     show_edges=False,
-    # )
-    # plotter.view_xy()
-    # plotter.show(screenshot=f"mixed_biot_disp_warped2.png")
+
+    plotter = pv.Plotter()
+    u_topology, u_cell_types, u_geometry = plot.vtk_mesh(u2plot.function_space)
+    u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
+    u2plot_modified = fem.Function(u2plot.function_space)
+    u2plot_modified.x.array[:] = u2plot.x.array
+    block_dofs_intf_frac = fem.locate_dofs_topological(
+            u2plot.function_space,
+            fdim,
+            np.concatenate([facets_frac, facets_interface_not_frac])
+    )
+    bs = u2plot.function_space.dofmap.index_map_bs
+    scalar_dofs_Gamma = (
+        bs * block_dofs_intf_frac[:, None]
+        + np.arange(bs)
+    ).reshape(-1)
+    u2plot_modified.x.array[scalar_dofs_Gamma] = 0.0
+    u_combined = fem.Function(u1plot.function_space)
+    u_combined.x.array[:] = u1plot.x.array + u2plot_modified.x.array
+    u_grid.point_data["u"] = u_combined.x.array.reshape((-1, 2))
+    plotter.add_mesh(
+        u_grid, scalars="u", component=0, show_edges=False, clim=[0, 0.0272], cmap=cmap,
+        scalar_bar_args={"title": r"$u_x$", "vertical": True,
+            "title_font_size": 24, "n_labels": 6,
+            "position_x": 0.8, "position_y": 0.103, "height": 0.815}
+    )
+    plotter.view_xy()
+    plotter.show(screenshot=f"mixed_biot_disp_sum.png")
 
     return V1, V2, Q1, Q2, Qc, u1times, u2times, p1times, p2times, pctimes
