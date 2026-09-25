@@ -9,7 +9,7 @@ from solve_full_model import *
 from flow_testing import *
 from draw_convergence_triangles import *
 
-initial_mesh_size = 1 / 4
+initial_mesh_size = 1 / 6
 num_grids = 6
 final_time = 0.01
 num_steps = 1
@@ -98,24 +98,24 @@ for i, (V1, V2, Q1, Q2, Qc, u1, u2, p1, p2, pc, cells) in enumerate(zip(V1_space
         u1_fine_interp.interpolate_nonmatching(u1t, cells_fine, interpolation_data=interp_data_u1)
         u2_fine_interp.interpolate_nonmatching(u2t, cells_fine, interpolation_data=interp_data_u2)
         # Pressure H1-error
-        error_L2_p = form((p1fine_t - p1_fine_interp) ** 2 * dx_test(1) + (p2fine_t - p2_fine_interp) ** 2 * dx_test(2))
+        error_L2_p = form((p1fine_t - p1_fine_interp) ** 2 * dx_fine(1) + (p2fine_t - p2_fine_interp) ** 2 * dx_fine(2))
         error_L2_p = np.sqrt(assemble_scalar(error_L2_p))
         max_err_L2_p = max(max_err_L2_p, error_L2_p)
-        error_grad_p_form = form(ufl.inner(ufl.grad(p1fine_t - p1_fine_interp), ufl.grad(p1fine_t - p1_fine_interp)) * dx_test(1) + ufl.inner(ufl.grad(p2fine_t - p2_fine_interp), ufl.grad(p2fine_t - p2_fine_interp)) * dx_test(2))          
+        error_grad_p_form = form(ufl.inner(ufl.grad(p1fine_t - p1_fine_interp), ufl.grad(p1fine_t - p1_fine_interp)) * dx_fine(1) + ufl.inner(ufl.grad(p2fine_t - p2_fine_interp), ufl.grad(p2fine_t - p2_fine_interp)) * dx_fine(2))          
         error_grad_p += assemble_scalar(error_grad_p_form)
 
         # Fracture pressure H1-error
-        error_L2_pc = form((pcfine_t("+") - pc_fine_interp("+")) ** 2 * dS_frac_away(1))
+        error_L2_pc = form((pcfine_t - pc_fine_interp) ** 2 * ds_fine(6))
         error_L2_pc = np.sqrt(assemble_scalar(error_L2_pc))
         max_err_L2_pc = max(max_err_L2_pc, error_L2_pc)
         tang = ufl.as_vector((1.0, 0.0))  # Tangent vector along the fracture, used to compute the tangential gradient along the fracture.
-        error_grad_pc_form = form(ufl.inner(ufl.dot(tang, ufl.grad(pcfine_t("+") - pc_fine_interp("+"))), ufl.dot(tang, ufl.grad(pcfine_t("+") - pc_fine_interp("+")))) * dS_frac_away(1))
+        error_grad_pc_form = form(ufl.inner(ufl.dot(tang, ufl.grad(pcfine_t - pc_fine_interp)), ufl.dot(tang, ufl.grad(pcfine_t - pc_fine_interp))) * ds_fine(6))
         error_grad_pc += assemble_scalar(error_grad_pc_form)
 
         # Displacement H1-error
-        error_L2_u = form(ufl.dot(u1fine_t - u1_fine_interp, u1fine_t - u1_fine_interp) * dx_test(1) + ufl.dot(u2fine_t - u2_fine_interp, u2fine_t - u2_fine_interp) * dx_test(2))
+        error_L2_u = form(ufl.dot(u1fine_t - u1_fine_interp, u1fine_t - u1_fine_interp) * dx_fine(1) + ufl.dot(u2fine_t - u2_fine_interp, u2fine_t - u2_fine_interp) * dx_fine(2))
         error_L2_u_squared = assemble_scalar(error_L2_u)
-        error_grad_u = form(ufl.inner(ufl.grad(u1fine_t - u1_fine_interp), ufl.grad(u1fine_t - u1_fine_interp)) * dx_test(1) + ufl.inner(ufl.grad(u2fine_t - u2_fine_interp), ufl.grad(u2fine_t - u2_fine_interp)) * dx_test(2))
+        error_grad_u = form(ufl.inner(ufl.grad(u1fine_t - u1_fine_interp), ufl.grad(u1fine_t - u1_fine_interp)) * dx_fine(1) + ufl.inner(ufl.grad(u2fine_t - u2_fine_interp), ufl.grad(u2fine_t - u2_fine_interp)) * dx_fine(2))
         error_grad_u_squared = assemble_scalar(error_grad_u)
         error_H1_u = np.sqrt(error_L2_u_squared + error_grad_u_squared)
         max_err_H1_u = max(max_err_H1_u, error_H1_u)
@@ -136,31 +136,29 @@ print(f"H1-rates pressure: {rates_H1_p}")
 print(f"H1-rates fracture pressure: {rates_H1_pc}")
 
 # Plot errors.
-hs_inv = 1 / hs
+# hs_inv = 1 / hs
 # print(hs_inv)
 # hs_inv = np.array([5.34845195, 10.69690391, 21.39380782, 42.78761563, 85.57523126])
-# EH1u = np.array([0.0013034, 0.00089071, 0.00062081, 0.00042625, 0.00027626])
-# EH1p = np.array([0.00249461, 0.00164215, 0.00109521, 0.00072685, 0.00046601])
-# EH1pc = np.array([0.02570497, 0.02275645, 0.01976688, 0.01656914, 0.01295177])
-# Continuous pressure across, fracture
-# EH1u = np.array([0.00242556, 0.00136228, 0.00095106, 0.0006546, 0.00042539])
-# EH1p = np.array([9.45816752e-04, 4.77325609e-04, 2.39104975e-04, 1.18075638e-04,
-#  5.65138430e-05])
-# EH1pc = np.array([6.03165119e-04, 3.02332157e-04, 1.49548078e-04, 7.28928632e-05,
-#  3.37000541e-05])
+# EH1u = np.array([1.52085919e-04, 9.82152517e-05, 6.35516484e-05, 4.04321894e-05, 2.44804154e-05])
+# EH1p = np.array([2.42997279e-05, 1.39373929e-05, 8.10873605e-06, 4.74334859e-06, 2.71397423e-06])
+# EH1pc = np.array([0.02210416, 0.01796613, 0.01469447, 0.01171412, 0.00870628])
+# With fracture tips removed
+# EH1u = np.array([1.40879441e-04, 8.67344669e-05, 5.05604395e-05, 2.90674511e-05, 1.62730441e-05])
+# EH1p = np.array([2.20386839e-05, 1.15136017e-05, 5.45052514e-06, 2.56287968e-06, 1.14187399e-06])
+# EH1pc = np.array([0.01153182, 0.00665695, 0.00219129, 0.00082123, 0.00036419])
 # fig, ax = plt.subplots()
 # ax.loglog(hs_inv, EH1u, marker='o', color='red')
 # ax.loglog(hs_inv, EH1p, marker='o', color='blue')
 # ax.loglog(hs_inv, EH1pc, marker='o', color='black')
-# ax.legend(["Displacement", "Pressure", "Fracture pressure"], fontsize=12, handlelength=3)
+# ax.legend(["Displacement", "Pressure", "Fracture pressure"], fontsize=11, handlelength=3, loc="upper right") #, bbox_to_anchor=(0.5, 0.73))
 # ax.set_xlabel("Inverse of mesh size (1/h)", fontsize=14)
 # ax.grid(which='both', alpha=0.3)
 # ax.set_ylabel(r"$H^1$-error", fontsize=14, labelpad=-3)
 # ax.set_xticks([5, 1e1, 2e1, 4e1, 8e1])
-# ax.set_ylim([2e-5, 3e-3])
+# # ax.set_ylim([2e-5, 3e-3])
 # ax.xaxis.set_major_formatter(mticker.ScalarFormatter())
 # ax.tick_params(labelsize=14.5)
-# draw_multiple_loglog_slopes(fig, ax, origin=(0.85 * hs_inv[-1], 0.95 * EH1u[-1]), triangle_width=1, inverted=True, slopes=[-0.62], labelcolor=(0.33, 0.33, 0.33))
-# draw_multiple_loglog_slopes(fig, ax, origin=(0.45 * hs_inv[-1], 1.3 * EH1p[-2]), triangle_width=1, inverted=False, slopes=[-1.06], labelcolor=(0.33, 0.33, 0.33))
-# draw_multiple_loglog_slopes(fig, ax, origin=(0.85 * hs_inv[-1], 0.95 * EH1pc[-1]), triangle_width=1, inverted=True, slopes=[-1.11], labelcolor=(0.33, 0.33, 0.33))   
-# plt.savefig("H1_errors_space_cont_pressure.png")
+# draw_multiple_loglog_slopes(fig, ax, origin=(0.46 * hs_inv[-1], 1.4 * EH1u[-2]), triangle_width=1, inverted=False, slopes=[-0.84], labelcolor=(0.33, 0.33, 0.33))
+# draw_multiple_loglog_slopes(fig, ax, origin=(0.46 * hs_inv[-1], 1.4 * EH1p[-2]), triangle_width=1, inverted=False, slopes=[-1.16], labelcolor=(0.33, 0.33, 0.33))
+# draw_multiple_loglog_slopes(fig, ax, origin=(0.85 * hs_inv[-1], 0.85 * EH1pc[-1]), triangle_width=1, inverted=True, slopes=[-1.17], labelcolor=(0.33, 0.33, 0.33))   
+# plt.savefig("H1_errors_space_not_tips.png")

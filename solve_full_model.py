@@ -184,8 +184,9 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
             ufl.grad(u)
         )  # Strain tensor
 
+    fracture_gap = 1e-4
     def g(x):  # Initial fracture gap.
-        return 2e-4 * x[1]
+        return 2 * fracture_gap * x[1]
 
     x = ufl.SpatialCoordinate(mesh)
     n = ufl.FacetNormal(mesh)
@@ -258,7 +259,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     coupling_term_fracture = ufl.inner(pc("+"), v_jump_norm) * dS_frac
     source_mechanics1 = ufl.inner(f, v1) * dx(1)
     source_mechanics2 = ufl.inner(f, v2) * dx(2)
-    trac = fem.Constant(mesh, default_scalar_type((0.005, -0.1)))
+    trac = fem.Constant(mesh, default_scalar_type((0.001, -0.1)))
     neumann = ufl.inner(trac, v1) * ds(4)
     interface_term = ufl.inner(lu("+"), v1("+") - v2("-")) * dS_intf + ufl.inner(mv("+"), u1("+") - u2("-")) * dS_intf
     mechanics_equation = A1 + A2 + B1 + B2 + coupling_term1 + coupling_term2 + coupling_term_fracture - source_mechanics1 - source_mechanics2 - interface_term - contact_condition - neumann
@@ -279,7 +280,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     tang = ufl.as_vector((1.0, 0.0))  # Tangent vector along the fracture, used to compute the tangential gradient along the fracture.
     accumulation_fracture = ufl.inner(c_f * g(x) * ((pc("+") - pc_n("+")) / dt) - ufl.inner(((u1("+") - u1_n("+") - u2("-") + u2_n("-")) / dt), n("+")), qc("+")) * dS_frac
     flux_fracture = 1 / (12 * mu) * ufl.inner(g(x)**3 * ufl.dot(ufl.grad(pc("+")), tang), ufl.dot(ufl.grad(qc("+")), tang)) * dS_frac
-    f_fluid_fracture = fem.Constant(mesh, default_scalar_type(2e2))  # Mass source term
+    f_fluid_fracture = fem.Constant(mesh, default_scalar_type(1.5e2))  # Mass source term
     source_flow_fracture = ufl.inner(g(x) * f_fluid_fracture, qc("+")) * dS_frac
     matrix_fracture_coupling_2 = 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p1("+")), qc("+")) * dS_frac + 1 / (6 * mu) * ufl.inner(g(x) * (pc("+") - p2("-")), qc("+")) * dS_frac
     fracture_fluid_equation = accumulation_fracture + flux_fracture - source_flow_fracture + matrix_fracture_coupling_2
@@ -289,7 +290,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
 
     # Initial condition
     def initial_condition_pressure(x):
-        return 0.05 * x[1]
+        return 0.1 * x[1]
     def initial_condition_displacement(x):
         return (0.05 * x[1], 0.05 * x[1])
     w_n.sub(0).interpolate(initial_condition_displacement)
@@ -429,7 +430,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     coords1 = V1.tabulate_dof_coordinates()[blocks_u1_frac]
     order1 = np.argsort(coords1[:, 0])
     coords1 = coords1[order1]
-    g_values = 1e-4 * coords1[:, 1]
+    g_values = 2 * fracture_gap * coords1[:, 1]
     penetration = jump_norm - g_values
     norm_traction = (
         -pen
@@ -469,6 +470,20 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
             f"friction bound = {F:.8e}, "
             f"normal traction = {nt:.8e}"
         )
+
+    ratio = np.zeros_like(friction_bound)
+    mask = friction_bound > 0
+    ratio[mask] = (
+        np.linalg.norm(tang_traction[mask], axis=1)
+        / friction_bound[mask]
+    )
+    print("Slip tendency:", ratio)
+    fig, ax = plt.subplots()
+    ax.plot(np.arange(1, len(ratio)+1), ratio, color="blue", zorder=2)
+    ax.set_xlabel("Fracture cell number", fontsize=14)
+    ax.set_xticks([1, 25, 50, 75, 100, 125, 150, 175, 200])
+    ax.set_ylabel("Slip tendency", fontsize=14)
+    plt.savefig("slip_tendency.png")
 
 
     plotter = pv.Plotter()
