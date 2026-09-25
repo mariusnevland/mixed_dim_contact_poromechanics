@@ -1,6 +1,8 @@
 import gmsh
 import dolfinx
 import mpi4py.MPI
+import numpy as np
+import ufl
 
 # Create the coarsest mesh used in the spatial convergence analysis.
 def create_initial_mesh(mesh_size):
@@ -147,3 +149,118 @@ def create_initial_nonfracture_mesh(mesh_size):
     assert boundaries_and_interfaces is not None
 
     return mesh, subdomains, boundaries_and_interfaces
+
+
+def ordered_interior_entities(facets, mesh, subdomains):
+
+    # Ensure consistent ordering of "+" and "-" sides for neighboring cells of the interface
+    # containing the fracture.
+    entities = dolfinx.fem.compute_integration_domains(
+        dolfinx.fem.IntegralType.interior_facet,
+        mesh.topology,
+        facets
+    )
+
+    entities = entities.reshape(-1, 4)
+
+    if len(entities) == 0:
+        return np.array([], dtype=np.int32)
+
+    connected_cells = entities[:, [0, 2]]
+
+    # We want:
+    # Omega1 (tag 1) = "+"
+    # Omega2 (tag 2) = "-"
+    swap = (
+        subdomains.values[connected_cells[:, 0]]
+        >
+        subdomains.values[connected_cells[:, 1]]
+    )
+
+    entities[swap] = entities[swap][:, [2, 3, 0, 1]]
+
+    return entities.flatten().astype(np.int32)
+
+
+def measure_away_from_tips(mesh, subdomains, boundaries_and_interfaces):
+
+    tdim = mesh.topology.dim
+    tip_left  = np.array([0.3, 0.5])
+    tip_right = np.array([0.7, 0.5])
+    cells_plus = subdomains.indices[subdomains.values == 1]
+    cells_minus = subdomains.indices[subdomains.values == 2]
+    midpoints_plus = dolfinx.mesh.compute_midpoints(
+        mesh, tdim, cells_plus
+    )
+    midpoints_minus = dolfinx.mesh.compute_midpoints(
+        mesh, tdim, cells_minus
+    )
+    delta = 0.05
+
+    xmid_plus = midpoints_plus[:, 0]
+    ymid_plus = midpoints_plus[:, 1]
+    xmid_minus = midpoints_minus[:, 0]
+    ymid_minus = midpoints_minus[:, 1]
+
+    r_left_plus = np.sqrt(
+        (xmid_plus - tip_left[0])**2
+        + (ymid_plus - tip_left[1])**2
+    )
+    r_right_plus = np.sqrt(
+        (xmid_plus - tip_right[0])**2
+        + (ymid_plus - tip_right[1])**2
+    )
+    r_left_minus = np.sqrt(
+        (xmid_minus - tip_left[0])**2
+        + (ymid_minus - tip_left[1])**2
+    )
+    r_right_minus = np.sqrt(
+        (xmid_minus - tip_right[0])**2
+        + (ymid_minus - tip_right[1])**2
+    )
+    mask_plus = (
+        (r_left_plus > delta)
+        & (r_right_plus > delta)
+    )
+    mask_minus = (
+        (r_left_minus > delta)
+        & (r_right_minus > delta)
+    )
+    # mask_minus = np.all(np.vstack([mask_minus, midpoints_minus[:, 1] > 0.01]), axis=0)
+    cells_test_plus = cells_plus[mask_plus].astype(np.int32)
+    cells_test_minus = cells_minus[mask_minus].astype(np.int32)
+    dx_frac_away = ufl.Measure(
+        "dx",
+        domain=mesh,
+        subdomain_data=[
+            (1, cells_test_plus),
+            (2, cells_test_minus)
+        ]
+    )
+
+    fdim = mesh.topology.dim - 1
+    # Fracture facets
+    fracture_facets = boundaries_and_interfaces.indices[boundaries_and_interfaces.values == 6]
+
+    # Compute facet midpoints
+    facet_midpoints = dolfinx.mesh.compute_midpoints(
+        mesh,
+        fdim,
+        fracture_facets
+    )
+    xmid = facet_midpoints[:, 0]
+
+    mask_frac = (
+        (xmid > 0.3 + delta)
+        & (xmid < 0.7 - delta)
+    )
+    fracture_facets_away = fracture_facets[mask_frac].astype(np.int32)
+    fracture_facets_away = ordered_interior_entities(fracture_facets_away, mesh, subdomains)
+    dS_frac_away = ufl.Measure(
+        "dS",
+        domain=mesh,
+        subdomain_data=[
+            (1, fracture_facets_away)
+        ]
+    )
+    return dx_frac_away, dS_frac_away
