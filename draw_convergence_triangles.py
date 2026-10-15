@@ -173,7 +173,7 @@ def draw_multiple_loglog_slopes(
             ha = "left"
             if len(slopes) == 1:
                 label_point[1] = (y2 + X[1][1]) / 2
-                label_va = "top"
+                label_va = "center"
         else:
             label_point = [x2 - 0.02 * x2, y2]  # Lower corner if inverted
             label_va = "center"
