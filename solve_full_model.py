@@ -1,25 +1,16 @@
-import dolfinx.fem
-import dolfinx.fem.petsc
 from dolfinx import plot, fem, default_real_type, default_scalar_type
-import dolfinx.io
-import gmsh
-import mpi4py.MPI
 import numpy as np
-import petsc4py.PETSc
 import ufl
 import pyvista as pv
 pv.off_screen = True
 from basix.ufl import element, mixed_element
-from matplotlib.colors import LinearSegmentedColormap
 from matplotlib import pyplot as plt
 from create_geometry import *
-
 import multiphenicsx.fem
 import multiphenicsx.fem.petsc
-from dolfinx.fem.petsc import NonlinearProblem
 
 def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, 
-                     num_steps, plot_sol=False, friction=True):
+                     num_steps, penalty=1, plot_sol=False):
 
     # Time stepping parameters
     t = 0.0
@@ -191,7 +182,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
     x = ufl.SpatialCoordinate(mesh)
     n = ufl.FacetNormal(mesh)
     # Contact condition
-    pen = 1e2  # Penalty/stiffness parameter
+    pen = penalty  # Penalty/stiffness parameter
     u_jump_norm = ufl.inner(n("+"), u1("+") - u2("-"))  # Normal jump of displacement across the fracture
     u_jump_tang = u1("+") - u2("-") - u_jump_norm * n("+")  # Tangential jump of displacement across the fracture
     v_jump_norm = ufl.inner(n("+"), v1("+") - v2("-"))
@@ -243,10 +234,7 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
             / ufl.sqrt(trial_sq)
         )
     )
-    if friction:
-        contact_condition = norm_traction * v_jump_norm * dS_frac + ufl.inner(tang_traction, v_jump_tang) * dS_frac   # Frictional contact condition
-    else:
-        contact_condition = norm_traction * v_jump_norm * dS_frac  # Frictionless contact condition
+    contact_condition = norm_traction * v_jump_norm * dS_frac + ufl.inner(tang_traction, v_jump_tang) * dS_frac   # Frictional contact condition
 
     # Mechanics equation, the equations for Omega1 and Omega2 are added.
     f = fem.Constant(mesh, default_scalar_type((0.0, 0.0)))  # Source term (body force)
@@ -290,9 +278,9 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
 
     # Initial condition
     def initial_condition_pressure(x):
-        return 0.1 * x[1]
+        return 0 * x[1]
     def initial_condition_displacement(x):
-        return (0.05 * x[1], 0.05 * x[1])
+        return (0 * x[1], 0 * x[1])
     w_n.sub(0).interpolate(initial_condition_displacement)
     w_n.sub(1).interpolate(initial_condition_displacement)
     w_n.sub(2).interpolate(initial_condition_displacement)
@@ -354,217 +342,124 @@ def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time,
 
 
     # # Plotting
-    u1plot = u1times[-1]
-    u2plot = u2times[-1]
-    pplot1 = p1times[-1]
-    pplot2 = p2times[-1]
-    pcplot = pctimes[-1]
-    # Locate displacement DOF blocks on the fracture
-    blocks_u1_frac = fem.locate_dofs_topological(
-        u1plot.function_space,
-        fdim,
-        facets_frac
-    )
-
-    blocks_u2_frac = fem.locate_dofs_topological(
-        u2plot.function_space,
-        fdim,
-        facets_frac
-    )
-
-    bs1 = u1plot.function_space.dofmap.index_map_bs
-    bs2 = u2plot.function_space.dofmap.index_map_bs
-
-    # Expand block indices to scalar component indices
-    dofs_u1_frac = (
-        bs1 * blocks_u1_frac[:, None] + np.arange(bs1)
-    ).reshape(-1)
-
-    dofs_u2_frac = (
-        bs2 * blocks_u2_frac[:, None] + np.arange(bs2)
-    ).reshape(-1)
-
-    # Reshape vector values
-    u1_vals = u1plot.x.array[dofs_u1_frac].reshape(-1, bs1)
-    u2_vals = u2plot.x.array[dofs_u2_frac].reshape(-1, bs2)
-
-    # Horizontal fracture: tangent = (1, 0)
-    jump_tang = u1_vals[:, 0] - u2_vals[:, 0]
-    n_plus = np.array([0.0, -1.0])
-
-    jump = u1_vals - u2_vals
-
-    jump_norm = jump @ n_plus
-
-    print("Tangential displacement jump:")
-    print(jump_tang)
-    print("Normal displacement jump:")
-    print(jump_norm)
-
-    u1_prev = u1times[-2]
-    u2_prev = u2times[-2]
-    u1_old_vals = u1_prev.x.array.reshape(-1, bs1)[blocks_u1_frac]
-    u2_old_vals = u2_prev.x.array.reshape(-1, bs2)[blocks_u2_frac]
-    n_plus = np.array([0.0, -1.0])
-    tang = np.array([1.0, 0.0])
-
-    jump = u1_vals - u2_vals
-    jump_old = u1_old_vals - u2_old_vals
-
-    jump_norm = jump @ n_plus
-    jump_norm_old = jump_old @ n_plus
-
-    jump_tang_vec = (
-        jump
-        - jump_norm[:, None] * n_plus
-    )
-    jump_tang_old_vec = (
-        jump_old
-        - jump_norm_old[:, None] * n_plus
-    )
-    trial = pen * (
-    jump_tang_vec
-    - jump_tang_old_vec
-    )
-    norm_trial = np.linalg.norm(trial, axis=1)
-    coords1 = V1.tabulate_dof_coordinates()[blocks_u1_frac]
-    order1 = np.argsort(coords1[:, 0])
-    coords1 = coords1[order1]
-    g_values = 2 * fracture_gap * coords1[:, 1]
-    penetration = jump_norm - g_values
-    norm_traction = (
-        -pen
-        * np.maximum(penetration, 0.0)
-    )
-    friction_bound = (
-        -mu_fr * norm_traction
-    )
-    tang_traction = np.zeros_like(trial)
-    contact = friction_bound > 0.0
-    stick = (
-        contact
-        & (norm_trial <= friction_bound)
-    )
-    slip = (
-        contact
-        & (norm_trial > friction_bound)
-    )
-    # Stick
-    tang_traction[stick] = trial[stick]
-    # Slip
-    tang_traction[slip] = (
-        friction_bound[slip, None]
-        * trial[slip]
-        / norm_trial[slip, None]
-    )
-    for xcoord, tt, F, nt in zip(
-    coords1[:, 0],
-    tang_traction,
-    friction_bound,
-    norm_traction
-    ):
-        print(
-            f"x = {xcoord:.6f}, "
-            f"tangential traction = {tt}, "
-            f"|t_t| = {np.linalg.norm(tt):.8e}, "
-            f"friction bound = {F:.8e}, "
-            f"normal traction = {nt:.8e}"
-        )
-
-    ratio = np.zeros_like(friction_bound)
-    mask = friction_bound > 0
-    ratio[mask] = (
-        np.linalg.norm(tang_traction[mask], axis=1)
-        / friction_bound[mask]
-    )
-    print("Slip tendency:", ratio)
-    fig, ax = plt.subplots()
-    ax.plot(np.arange(1, len(ratio)+1), ratio, color="blue", zorder=2)
-    ax.set_xlabel("Fracture cell number", fontsize=14)
-    ax.set_xticks([1, 25, 50, 75, 100, 125, 150, 175, 200])
-    ax.set_ylabel("Slip tendency", fontsize=14)
-    plt.savefig("slip_tendency.png")
-
-
-    plotter = pv.Plotter()
-    p_topology, p_cell_types, p_geometry = plot.vtk_mesh(pplot2.function_space)
-    p_grid = pv.UnstructuredGrid(p_topology, p_cell_types, p_geometry)
-    pplot2_modified = fem.Function(pplot2.function_space)
-    pplot2_modified.x.array[:] = pplot2.x.array
-    dofs_intf_frac = fem.locate_dofs_topological(
-            pplot2.function_space,
+    if plot_sol:
+        u1plot = u1times[-1]
+        u2plot = u2times[-1]
+        pplot1 = p1times[-1]
+        pplot2 = p2times[-1]
+        # Locate displacement DOF blocks on the fracture
+        blocks_u1_frac = fem.locate_dofs_topological(
+            u1plot.function_space,
             fdim,
-            np.concatenate([facets_frac, facets_interface_not_frac])
-    )
-    pplot2_modified.x.array[dofs_intf_frac] = 0.0
-    p_combined = fem.Function(pplot1.function_space)
-    p_combined.x.array[:] = pplot1.x.array + pplot2_modified.x.array
-    p_grid.point_data["p"] = p_combined.x.array
-    plotter.add_mesh(
-        p_grid, show_edges=False, cmap="coolwarm",
-        scalar_bar_args={"title": r"$p$", "vertical": True,
-                    "title_font_size": 24, "n_labels": 6,
-                    "position_x": 0.8, "position_y": 0.103, "height": 0.815}
-    )
-    plotter.view_xy()
-    plotter.show(screenshot=f"mixed_biot_matrix_sum.png")
-
-    plotter = pv.Plotter()
-    pc_topology, pc_cell_types, pc_geometry = plot.vtk_mesh(pcplot.function_space)
-    pc_grid = pv.UnstructuredGrid(pc_topology, pc_cell_types, pc_geometry)
-    pc_grid.point_data["pc"] = pcplot.x.array
-    plotter.add_mesh(
-        pc_grid, show_edges=True
-    )
-    plotter.view_xy()
-    plotter.show(screenshot=f"mixed_biot_fracture.png")
-
-    # plotter = pv.Plotter()
-    # u_topology, u_cell_types, u_geometry = plot.vtk_mesh(u1plot.function_space)
-    # u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
-    # u_grid.point_data["u"] = u1plot.x.array.reshape((-1, 2))
-    # plotter.add_mesh(
-    #     u_grid, scalars="u", component=0, show_edges=True
-    # )
-    # plotter.view_xy()
-    # plotter.show(screenshot=f"mixed_biot_disp_upper.png")
-
-    # plotter = pv.Plotter()
-    # u_topology, u_cell_types, u_geometry = plot.vtk_mesh(u2plot.function_space)
-    # u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
-    # u_grid.point_data["u"] = u2plot.x.array.reshape((-1, 2))
-    # plotter.add_mesh(
-    #     u_grid, scalars="u", component=0, show_edges=True
-    # )
-    # plotter.view_xy()
-    # plotter.show(screenshot=f"mixed_biot_disp_lower.png")
-
-    plotter = pv.Plotter()
-    u_topology, u_cell_types, u_geometry = plot.vtk_mesh(u2plot.function_space)
-    u_grid = pv.UnstructuredGrid(u_topology, u_cell_types, u_geometry)
-    u2plot_modified = fem.Function(u2plot.function_space)
-    u2plot_modified.x.array[:] = u2plot.x.array
-    block_dofs_intf_frac = fem.locate_dofs_topological(
+            facets_frac
+        )
+        blocks_u2_frac = fem.locate_dofs_topological(
             u2plot.function_space,
             fdim,
-            np.concatenate([facets_frac, facets_interface_not_frac])
-    )
-    bs = u2plot.function_space.dofmap.index_map_bs
-    scalar_dofs_Gamma = (
-        bs * block_dofs_intf_frac[:, None]
-        + np.arange(bs)
-    ).reshape(-1)
-    u2plot_modified.x.array[scalar_dofs_Gamma] = 0.0
-    u_combined = fem.Function(u1plot.function_space)
-    u_combined.x.array[:] = u1plot.x.array + u2plot_modified.x.array
-    u_grid.point_data["u"] = u_combined.x.array.reshape((-1, 2))
-    plotter.add_mesh(
-        u_grid, scalars="u", component=0, show_edges=False, cmap="coolwarm",
-        scalar_bar_args={"title": r"$u_x$", "vertical": True,
-            "title_font_size": 24, "n_labels": 6,
-            "position_x": 0.8, "position_y": 0.103, "height": 0.815}
-    )
-    plotter.view_xy()
-    plotter.show(screenshot=f"mixed_biot_disp_sum.png")
+            facets_frac
+        )
+        bs1 = u1plot.function_space.dofmap.index_map_bs
+        bs2 = u2plot.function_space.dofmap.index_map_bs
+
+        # Expand block indices to scalar component indices
+        dofs_u1_frac = (
+            bs1 * blocks_u1_frac[:, None] + np.arange(bs1)
+        ).reshape(-1)
+
+        dofs_u2_frac = (
+            bs2 * blocks_u2_frac[:, None] + np.arange(bs2)
+        ).reshape(-1)
+
+        # # Reshape vector values
+        u1_vals = u1plot.x.array[dofs_u1_frac].reshape(-1, bs1)
+        u2_vals = u2plot.x.array[dofs_u2_frac].reshape(-1, bs2)
+        u1_prev = u1times[-2]
+        u2_prev = u2times[-2]
+        u1_old_vals = u1_prev.x.array.reshape(-1, bs1)[blocks_u1_frac]
+        u2_old_vals = u2_prev.x.array.reshape(-1, bs2)[blocks_u2_frac]
+        n_plus = np.array([0.0, -1.0])
+
+        # Compute slip tendency, i.e., the ratio of tangential traction magnitude to friction bound.
+        jump = u1_vals - u2_vals
+        jump_old = u1_old_vals - u2_old_vals
+        jump_norm = jump @ n_plus
+        jump_norm_old = jump_old @ n_plus
+        jump_tang_vec = (
+            jump
+            - jump_norm[:, None] * n_plus
+        )
+        jump_tang_old_vec = (
+            jump_old
+            - jump_norm_old[:, None] * n_plus
+        )
+        trial = pen * (
+        jump_tang_vec
+        - jump_tang_old_vec
+        )
+        norm_trial = np.linalg.norm(trial, axis=1)
+        coords1 = V1.tabulate_dof_coordinates()[blocks_u1_frac]
+        order1 = np.argsort(coords1[:, 0])
+        coords1 = coords1[order1]
+        g_values = 2 * fracture_gap * coords1[:, 1]
+        penetration = jump_norm - g_values
+        norm_traction = (
+            -pen
+            * np.maximum(penetration, 0.0)
+        )
+        friction_bound = (
+            -mu_fr * norm_traction
+        )
+        tang_traction = np.zeros_like(trial)
+        contact = friction_bound > 0.0
+        stick = (
+            contact
+            & (norm_trial <= friction_bound)
+        )
+        slip = (
+            contact
+            & (norm_trial > friction_bound)
+        )
+        tang_traction[stick] = trial[stick]
+        tang_traction[slip] = (
+            friction_bound[slip, None]
+            * trial[slip]
+            / norm_trial[slip, None]
+        )
+        ratio = np.zeros_like(friction_bound)
+        mask = friction_bound > 0
+        ratio[mask] = (
+            np.linalg.norm(tang_traction[mask], axis=1)
+            / friction_bound[mask]
+        )
+        _, ax = plt.subplots()
+        ax.plot(np.arange(1, len(ratio)+1), ratio, color="blue", zorder=2)
+        ax.set_xlabel("Fracture cell number", fontsize=14)
+        ax.set_xticks([1, 25, 50, 75, 100, 125, 150, 175, 200])
+        ax.set_ylabel("Slip tendency", fontsize=14)
+        plt.savefig("slip_tendency.png")
+
+        # Plot the pressure field in the matrix, choose arbitrarily to plot the + side on the interface nodes.
+        plotter = pv.Plotter()
+        p_topology, p_cell_types, p_geometry = plot.vtk_mesh(pplot2.function_space)
+        p_grid = pv.UnstructuredGrid(p_topology, p_cell_types, p_geometry)
+        pplot2_modified = fem.Function(pplot2.function_space)
+        pplot2_modified.x.array[:] = pplot2.x.array
+        dofs_intf_frac = fem.locate_dofs_topological(
+                pplot2.function_space,
+                fdim,
+                np.concatenate([facets_frac, facets_interface_not_frac])
+        )
+        pplot2_modified.x.array[dofs_intf_frac] = 0.0
+        p_combined = fem.Function(pplot1.function_space)
+        p_combined.x.array[:] = pplot1.x.array + pplot2_modified.x.array
+        p_grid.point_data["p"] = p_combined.x.array
+        plotter.add_mesh(
+            p_grid, show_edges=False, cmap="coolwarm",
+            scalar_bar_args={"title": r"$p$", "vertical": True,
+                        "title_font_size": 24, "n_labels": 6,
+                        "position_x": 0.8, "position_y": 0.103, "height": 0.815}
+        )
+        plotter.view_xy()
+        plotter.show(screenshot=f"matrix_pressure.png")
 
     return V1, V2, Q1, Q2, Qc, u1times, u2times, p1times, p2times, pctimes
