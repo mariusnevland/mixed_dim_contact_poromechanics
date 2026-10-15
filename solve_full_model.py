@@ -5,7 +5,7 @@ import pyvista as pv
 pv.off_screen = True
 from basix.ufl import element, mixed_element
 from matplotlib import pyplot as plt
-from create_geometry import *
+from utility_functions import *
 import multiphenicsx.fem
 import multiphenicsx.fem.petsc
 

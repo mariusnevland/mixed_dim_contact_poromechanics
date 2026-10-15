@@ -4,9 +4,8 @@ import matplotlib.ticker as mticker
 import ufl
 import numpy as np
 from matplotlib import pyplot as plt
-from create_geometry import *
+from utility_functions import *
 from solve_full_model import *
-from draw_convergence_triangles import *
 
 initial_mesh_size = 1 / 6
 num_grids = 6
@@ -199,6 +198,8 @@ ax.set_xlabel("Inverse of mesh size (1/h)", fontsize=14)
 ax.grid(which='both', alpha=0.3)
 ax.set_ylabel("Error", fontsize=14, labelpad=-3)
 ax.set_xticks([5, 1e1, 2e1, 4e1, 8e1])
+ax.xaxis.set_major_formatter(mticker.ScalarFormatter())
+ax.tick_params(labelsize=14.5)
 draw_multiple_loglog_slopes(fig, ax, origin=(0.95 * hs_inv[-1], 0.76 * EH1u_no_tips[-1]), triangle_width=1, inverted=True, slopes=[-0.87], labelcolor=(0.33, 0.33, 0.33))
 draw_multiple_loglog_slopes(fig, ax, origin=(0.48 * hs_inv[-1], 1.5 * EH1p_no_tips[-2]), triangle_width=1, inverted=False, slopes=[-1.17], labelcolor=(0.33, 0.33, 0.33))
 draw_multiple_loglog_slopes(fig, ax, origin=(0.95 * hs_inv[-1], 0.76 * EH1pc_no_tips[-1]), triangle_width=1, inverted=True, slopes=[-1.17], labelcolor=(0.33, 0.33, 0.33))   

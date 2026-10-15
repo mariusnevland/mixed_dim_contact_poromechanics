@@ -4,9 +4,8 @@ import matplotlib.ticker as mticker
 import ufl
 import numpy as np
 from matplotlib import pyplot as plt
-from create_geometry import *
+from utility_functions import *
 from solve_full_model import *
-from draw_convergence_triangles import *
 
 mesh_size = 1 / 64
 num_refinements = 6
