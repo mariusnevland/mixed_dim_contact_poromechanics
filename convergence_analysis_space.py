@@ -5,7 +5,7 @@ import ufl
 import numpy as np
 from matplotlib import pyplot as plt
 from utility_functions import *
-from solve_full_model import *
+from solve_mixed_dimensional_model import *
 
 initial_mesh_size = 1 / 6
 num_grids = 6
@@ -28,7 +28,7 @@ mesh, subdomains, boundaries_and_interfaces = create_initial_mesh(initial_mesh_s
 
 # Compute solution on a sequence of nested, refined meshes.
 for i in range(num_grids-1):
-    V1, V2, Q1, Q2, Qc, u1, u2, p1, p2, pc = solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps, 1e2)
+    V1, V2, Q1, Q2, Qc, u1, u2, p1, p2, pc = solve_mixed_dimensional_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps, 1e2)
     V1_spaces.append(V1)
     V2_spaces.append(V2)
     Q1_spaces.append(Q1)
@@ -51,7 +51,7 @@ for i in range(num_grids-1):
 # Compute solution on very fine mesh as the reference solution.
 for _ in range(2):
     mesh, subdomains, boundaries_and_interfaces = refine_mesh_with_tags(mesh, subdomains, boundaries_and_interfaces)
-V1_fine, V2_fine, Q1_fine, Q2_fine, Qc_fine, u1_fine, u2_fine, p1_fine, p2_fine, pc_fine = solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps, 1e2, plot_sol=True)
+V1_fine, V2_fine, Q1_fine, Q2_fine, Qc_fine, u1_fine, u2_fine, p1_fine, p2_fine, pc_fine = solve_mixed_dimensional_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps, 1e2, plot_sol=True)
 num_cells = mesh.topology.index_map(mesh.topology.dim).size_local
 cells_fine = np.arange(num_cells, dtype=np.int32)
 dx_fine = ufl.Measure("dx", domain=mesh, subdomain_data=subdomains)

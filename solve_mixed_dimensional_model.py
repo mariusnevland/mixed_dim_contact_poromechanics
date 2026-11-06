@@ -9,7 +9,7 @@ from utility_functions import *
 import multiphenicsx.fem
 import multiphenicsx.fem.petsc
 
-def solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, 
+def solve_mixed_dimensional_model(mesh, subdomains, boundaries_and_interfaces, final_time, 
                      num_steps, penalty=1, plot_sol=False):
 
     # Time stepping parameters

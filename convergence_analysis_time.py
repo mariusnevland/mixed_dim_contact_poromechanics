@@ -5,7 +5,7 @@ import ufl
 import numpy as np
 from matplotlib import pyplot as plt
 from utility_functions import *
-from solve_full_model import *
+from solve_mixed_dimensional_model import *
 
 mesh_size = 1 / 64
 num_refinements = 6
@@ -22,7 +22,7 @@ mesh, subdomains, boundaries_and_interfaces = create_initial_mesh(mesh_size)
 
 # Compute solution for a sequence of progressively smaller time steps.
 for i in range(num_refinements):
-    _, _, _, _, _, u1, u2, p1, p2, pc = solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps[i], 1e1)
+    _, _, _, _, _, u1, u2, p1, p2, pc = solve_mixed_dimensional_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps[i], 1e1)
     u1_sols.append(u1)
     u2_sols.append(u2)
     p1_sols.append(p1)
@@ -31,7 +31,7 @@ for i in range(num_refinements):
 
 # Compute reference solution using a very small time step.
 num_steps_final = 6 * num_steps[-1]
-_, _, _, _, _, u1_fine, u2_fine, p1_fine, p2_fine, pc_fine = solve_full_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps_final, 1e1)
+_, _, _, _, _, u1_fine, u2_fine, p1_fine, p2_fine, pc_fine = solve_mixed_dimensional_model(mesh, subdomains, boundaries_and_interfaces, final_time, num_steps_final, 1e1)
 EL2u = np.zeros(len(u1_sols), dtype=default_scalar_type)
 EL2p = np.zeros(len(p1_sols), dtype=default_scalar_type)
 EH1u = np.zeros(len(u1_sols), dtype=default_scalar_type)
