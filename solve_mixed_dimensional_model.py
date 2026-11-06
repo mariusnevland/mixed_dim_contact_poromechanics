@@ -328,10 +328,7 @@ def solve_mixed_dimensional_model(mesh, subdomains, boundaries_and_interfaces, f
         t += dt
         _ = problem.solve()
         converged_reason = problem.solver.getConvergedReason()
-        print(converged_reason)
         assert converged_reason > 0
-        num_iterations = problem.solver.getIterationNumber()
-        print(f"Time step {step}: {converged_reason=} {num_iterations=}")
         w_n.x.array[:] = w.x.array  # Update solution at previous time step
         u1times.append(w.sub(0).collapse())
         u2times.append(w.sub(1).collapse())
