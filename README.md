@@ -1,0 +1,5 @@
+This repository contains run scripts for the paper "Numerical analysis of coupled flow, deformation and frictional contact mechanics in a fractured porous medium".
+
+The script `convergence_analysis_space.py` performs a spatial convergence analysis and reproduces Tables 1-2 and Figures 2-4 in the paper. The script `convergence_analysis_time.py` performs a temporal convergence analysis and reproduces Table 3 and Figure 5 in the paper. Both scripts use the function `solve_mixed_dimensional_model()` from the file with the same name, where the setup and solution of the discrete systems are done. Other various utility functions are found in `utility_functions.py`.
+
+This code has been run using multiphenicsx, https://multiphenics.github.io/, an extension of the finite element software FEniCSx that facilitates the restriction of variables to specific subdomains/boundaries. The results of this paper can be reproduced by downloading the Docker image available on Zenodo, https://zenodo.org/uploads/23396051.
